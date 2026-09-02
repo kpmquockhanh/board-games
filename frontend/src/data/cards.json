@@ -1,0 +1,274 @@
+{
+  "game": "Exploding Kittens",
+  "version": "1.0",
+  "totalCards": 182,
+  "categories": {
+    "explosive": {
+      "name": "Explosive Cards",
+      "description": "Cards that cause explosions and eliminate players",
+      "cards": [
+        { "id": "ex_001", "name": "Exploding Kitten - TNT Ship", "file": "exploding_kitten__tnt_ship.jpg" },
+        { "id": "ex_002", "name": "Exploding Kitten - House Grenade", "file": "exploding_kitten__house_grenade.jpg" },
+        { "id": "ex_003", "name": "Exploding Kitten - Nuclear Bombs", "file": "exploding_kitten__nuclear_bombs.jpg" },
+        { "id": "ex_004", "name": "Exploding Kitten - Warp Core", "file": "exploding_kitten__warp_core.jpg" },
+        { "id": "ex_005", "name": "Exploding Kitten - Alien", "file": "exploding_kitten__alien.jpg" },
+        { "id": "ex_006", "name": "Exploding Kitten - C4", "file": "exploding_kitten__c4.jpg" },
+        { "id": "ex_007", "name": "Exploding Kitten - Science", "file": "exploding_kitten__science.jpg" },
+        { "id": "ex_008", "name": "Exploding Kitten - Playground", "file": "exploding_kitten__playground.jpg" },
+        { "id": "ex_009", "name": "Exploding Kitten - Car Off Cliff", "file": "exploding_kitten__car_off_cliff.jpg" },
+        { "id": "ex_010", "name": "Exploding Kitten - Balloon Bomb", "file": "exploding_kitten__exploing_kitten_balloon_bomb.jpg" },
+        { "id": "ex_011", "name": "Exploding Kitten - Pepper", "file": "exploding_kitten__exploing_kitten_pepper.jpg" },
+        { "id": "ex_012", "name": "Exploding Kitten - Divide By Zero", "file": "exploding_kitten__exploing_kitten_divide_by_zero.jpg" },
+        { "id": "ex_013", "name": "Exploding Kitten - Holy Water Balloons", "file": "exploding_kitten__exploing_kitten_holy_water_balloons.jpg" },
+        { "id": "ex_015", "name": "Streaking Kitten", "file": "streaking_kitten.jpg" },
+        { "id": "ex_016", "name": "Zombie Kitten - Land On Feet", "file": "zombie_kitten__always_land_on_your_feet.jpg" },
+        { "id": "ex_017", "name": "Zombie Kitten - Entertain Yourself", "file": "zombie_kitten__learn_to_entertain_yourself.jpg" },
+        { "id": "ex_018", "name": "Zombie Kitten - Hairball Hairdo", "file": "zombie_kitten__cough_up_a_hairball_with_a_hairdo.jpg" },
+        { "id": "ex_019", "name": "Zombie Kitten - Weekend Friendship", "file": "zombie_kitten__friendship_lasts_all_weekend.jpg" },
+        { "id": "ex_020", "name": "Zombie Kitten - Alien Incubator", "file": "zombie_kitten__become_an_alien_incubator.jpg" }
+      ]
+    },
+    "defense": {
+      "name": "Defense Cards",
+      "description": "Cards that protect you from explosions",
+      "cards": [
+        { "id": "df_001", "name": "Defuse - Belly Rubs", "file": "defuse__via_belly_rubs.jpg" },
+        { "id": "df_002", "name": "Defuse - Tummy Rubs", "file": "defuse__via_tummy_rubs.jpg" },
+        { "id": "df_003", "name": "Defuse - Catnip Sandwiches", "file": "defuse__via_catnip_sandwiches.jpg" },
+        { "id": "df_004", "name": "Defuse - Catnip Sweater", "file": "defuse__via_catnip_sweater.jpg" },
+        { "id": "df_005", "name": "Defuse - Kitten Therapy", "file": "defuse__via_kitten_therapy.jpg" },
+        { "id": "df_006", "name": "Defuse - Kitten Yoga", "file": "defuse__via_participation_in_kitten_yoga.jpg" },
+        { "id": "df_007", "name": "Defuse - Laser Pointer", "file": "defuse__via_laser_pointer.jpg" },
+        { "id": "df_008", "name": "Defuse - Laser Tag", "file": "defuse__via_laser_tag.jpg" },
+        { "id": "df_009", "name": "Defuse - Nature Documentaries", "file": "defuse__via_nature_documentaries.jpg" },
+        { "id": "df_010", "name": "Defuse - 3AM Flatulence", "file": "defuse__via_3am_flatulence.jpg" },
+        { "id": "df_011", "name": "Defuse - Crate", "file": "defuse__via_crate.jpg" },
+        { "id": "df_012", "name": "Defuse - Excessive Ball Cleaning", "file": "defuse__via_excessive_ball_cleaning.jpg" },
+        { "id": "df_013", "name": "Defuse - Flattering LARP", "file": "defuse__via_flattering_larp.jpg" },
+        { "id": "df_014", "name": "Defuse - Mauling A Baby", "file": "defuse__via_mauling_a_baby.jpg" },
+        { "id": "df_015", "name": "Defuse - Porkback Riding", "file": "defuse__via_porkback_riding_into_the_sunset_together.jpg" },
+        { "id": "df_016", "name": "Defuse - Scratching", "file": "defuse__via_scratching.jpg" },
+        { "id": "df_017", "name": "Defuse - Spay Neuter", "file": "defuse__via_spay_neuter.jpg" },
+        { "id": "df_018", "name": "Defuse - Turning Into Tuna", "file": "defuse__via_turning_into_tuna.jpg" }
+      ]
+    },
+    "attack": {
+      "name": "Attack Cards",
+      "description": "Force other players to take extra turns",
+      "cards": [
+        { "id": "at_001", "name": "Bear-o-Dactyl", "file": "attack_2x__bear_o_dactyl.jpg" },
+        { "id": "at_002", "name": "Catterwocky", "file": "attack_2x__catterwocky.jpg" },
+        { "id": "at_003", "name": "Crab-a-Pult", "file": "attack_2x__crab_a_pult.jpg" },
+        { "id": "at_004", "name": "Penguin Diarrhea", "file": "attack_2x__penguin_diarrhea.jpg" },
+        { "id": "at_005", "name": "Rubber Duck Collection", "file": "attack_2x__rubber_duck_collection.jpg" },
+        { "id": "at_006", "name": "Thousand Year Back Hair", "file": "attack_2x__thousand_year_back_hair.jpg" },
+        { "id": "at_007", "name": "Torture Bunnies", "file": "attack_2x__torture_bunnies.jpg" },
+        { "id": "at_008", "name": "Squid Arm Slap", "file": "attack_2x__grow_a_magnifient_squid_arm_and_start_slapping_fat_babies.jpg" },
+        { "id": "at_010", "name": "Groin Kicking Panda", "file": "targeted_attack_2x__deploy_the_groin_kicking_panda_bear.jpg" },
+        { "id": "at_011", "name": "Fat Hamster Crossbow", "file": "targeted_attack_2x__fire_the_fat_hamster_crossbow.jpg" },
+        { "id": "at_012", "name": "Words Shark", "file": "targeted_attack_2x__unleash_a_shark_who_hurts_with_words_instead_of_teeth.jpg" },
+        { "id": "at_013", "name": "Accomplished Trout", "file": "personal_attack_3x__listen_to_the_boastings_of_some_very_accomplished_trout.jpg" },
+        { "id": "at_014", "name": "Fierce Spankin", "file": "personal_attack_3x__give_yourself_a_fierce_spankin.jpg" },
+        { "id": "at_015", "name": "Heck Beaver", "file": "personal_attack_3x__get_cursed_at_by_a_heck_beaver.jpg" },
+        { "id": "at_016", "name": "Crayon Throw Up", "file": "personal_attack_3x__finally_throw_up_all_the_crayons_you_ate_when_you_were_a_kid.jpg" }
+      ]
+    },
+    "skip": {
+      "name": "Skip",
+      "description": "End your turn immediately without drawing a card",
+      "cards": [
+        { "id": "sk_001", "name": "Crab Walk", "file": "skip__crab_walk_with_some_crabs.jpg" },
+        { "id": "sk_002", "name": "Hypergoat", "file": "skip__engage_the_hypergoat.jpg" },
+        { "id": "sk_003", "name": "Bunnyraptor", "file": "skip__commandeer_a_bunnyraptor.jpg" },
+        { "id": "sk_004", "name": "Cheetah Butt", "file": "skip__don_a_portable_cheetah_butt.jpg" },
+        { "id": "sk_005", "name": "Whale Boner Tetherball", "file": "skip__play_a_game_of_whale_boner_tetherball.jpg" },
+        { "id": "sk_006", "name": "Penis Balloon", "file": "skip__sail_away_on_your_penis_balloon.jpg" },
+        { "id": "sk_007", "name": "Old Lady Boobs", "file": "skip__go_base_jumping_using_a_pair_of_old_lady_boobs.jpg" },
+        { "id": "sk_008", "name": "Sasquatch Underpants", "file": "skip__evade_dirty_sasquatch_underpants.jpg" }
+      ]
+    },
+    "super_skip": {
+      "name": "Super Skip",
+      "description": "End your turn and cancel ALL remaining forced turns",
+      "cards": [
+        { "id": "sk_009", "name": "Super Skip", "file": "super_skip.jpg" }
+      ]
+    },
+    "reverse": {
+      "name": "Reverse",
+      "description": "End your turn and reverse the direction of play",
+      "cards": [
+        { "id": "sk_010", "name": "Reverse - Try Something New", "file": "reverse__try_something_new_today.jpg" },
+        { "id": "sk_011", "name": "Reverse - Doctor Visit", "file": "reverse__return_from_an_unpleasant_doctor_s_visit.jpg" },
+        { "id": "sk_012", "name": "Reverse - Steal Dinosaur", "file": "reverse__go_back_in_time_and_steal_a_pregnant_dinosaur.jpg" },
+        { "id": "sk_013", "name": "Reverse - Tummy Massage", "file": "reverse__receive_a_hairy_tummy_massage.jpg" }
+      ]
+    },
+    "future_vision": {
+      "name": "Future Vision",
+      "description": "See or change the future cards",
+      "cards": [
+        { "id": "fv_001", "name": "See Future - Unicorn Enchilada", "file": "see_the_future_3x__fear_upon_a_unicorn_enchilada.jpg" },
+        { "id": "fv_002", "name": "See Future - Special Ops Bunnies", "file": "see_the_future_3x__deploy_the_special_ops_bunnies.jpg" },
+        { "id": "fv_003", "name": "See Future - Mantis Shrimp", "file": "see_the_future_3x__summon_the_mantis_shrimp.jpg" },
+        { "id": "fv_004", "name": "See Future - Pig-a-Corn Belly", "file": "see_the_future_3x__rub_the_belly_of_a_pig_a_corn.jpg" },
+        { "id": "fv_005", "name": "See Future - Goat Wizard", "file": "see_the_future_3x__ask_the_all_seeing_goat_wizard.jpg" },
+        { "id": "fv_006", "name": "See Future - Infinity Boner", "file": "see_the_future_3x__weave_an_infinity_boner.jpg" },
+        { "id": "fv_007", "name": "See Future - Bald Eagle Tears", "file": "see_the_future_3x__drink_an_entire_bottle_of_bald_eagle_tears.jpg" },
+        { "id": "fv_008", "name": "See Future - Butterfly Genitals", "file": "see_the_future_3x__attach_a_butterfly_to_your_genitals.jpg" },
+        { "id": "fv_009", "name": "See Future - Goat Butt", "file": "see_the_future_3x__crawl_inside_a_goat_butt.jpg" },
+        { "id": "fv_010", "name": "See Future - Boob Wizard", "file": "see_the_future_3x__discover_a_boob_wizard.jpg" },
+        { "id": "fv_011", "name": "See Future - Angler Pig", "file": "see_the_future_5x__behold_the_angler_pig.jpg" },
+        { "id": "fv_012", "name": "Alter Future - Cat Wizard", "file": "alter_the_future_3x__cat_wizard.jpg" },
+        { "id": "fv_013", "name": "Alter Future - Furmaid", "file": "alter_the_future_3x__furmaid.jpg" },
+        { "id": "fv_014", "name": "Alter Future - Golden Haired Manatee", "file": "alter_the_future_3x__golden_haired_manatee.jpg" },
+        { "id": "fv_015", "name": "Alter Future - Time Traveling Crab", "file": "alter_the_future_3x__time_traveling_crab.jpg" },
+        { "id": "fv_016", "name": "Alter Future - Nikola Telsa", "file": "alter_the_future_5x__nikola_telsa.jpg" },
+        { "id": "fv_017", "name": "Alter Future - Get That Perm", "file": "alter_the_future_3x_now__alter_the_future_get_that_perm_youve_always_wanted.jpg" },
+        { "id": "fv_018", "name": "Reveal Future - Extra Eyes", "file": "reveal_the_future_3x__extra_pair_of_eyes.jpg" },
+        { "id": "fv_019", "name": "Reveal Future - Particle Accelerator", "file": "reveal_the_future_3x__particle_accelerator.jpg" },
+        { "id": "fv_020", "name": "Reveal Future - Go Back In Time", "file": "reveal_the_future_3x__go_back_in_time.jpg" },
+        { "id": "fv_021", "name": "Share Future - Recon Sloth", "file": "share_the_future_3x__send_in_the_recon_sloth.jpg" },
+        { "id": "fv_022", "name": "Share Future - Emo Emu", "file": "share_the_future_3x__listen_to_the_words_of_an_emo_emu.jpg" }
+      ]
+    },
+    "nope": {
+      "name": "Nope Cards",
+      "description": "Cancel any action played by another player",
+      "cards": [
+        { "id": "np_002", "name": "Nope Sandwich", "file": "nope__feed_your_opponent_a_nope_sandwich.jpg" },
+        { "id": "np_003", "name": "Jackanope", "file": "nope__a_jackanope_bounds_into_the_room.jpg" },
+        { "id": "np_004", "name": "Narnope", "file": "nope__awaken_the_narnope.jpg" },
+        { "id": "np_005", "name": "Pope of Nope", "file": "nope__the_pope_of_nope_has_spoken.jpg" },
+        { "id": "np_006", "name": "Cantanope", "file": "nope__feed_your_apponent_some_cantanope.jpg" },
+        { "id": "np_007", "name": "Jump Rope Nope", "file": "nope__deliver_some_nope_on_your_jump_rope.jpg" },
+        { "id": "np_008", "name": "Necktie of Nope", "file": "nope__put_on_your_necktie_of_nope.jpg" },
+        { "id": "np_009", "name": "Nopestradamus", "file": "nope__stradamus_speaks_the_truth.jpg" },
+        { "id": "np_010", "name": "Nope Ninja", "file": "nope__a_nope_ninja.jpg" },
+        { "id": "np_011", "name": "Nopebell Peace Prize", "file": "nope__win_the_nopebell_peace_prize.jpg" }
+      ]
+    },
+    "shuffle": {
+      "name": "Shuffle",
+      "description": "Shuffle the draw pile",
+      "cards": [
+        { "id": "dm_001", "name": "Shuffle - Bat Farts Plague", "file": "shuffle__a_plague_of_bat_farts.jpg" },
+        { "id": "dm_002", "name": "Shuffle - Pomeranian Storm", "file": "shuffle__an_electromagnetic_pomeranian_storm.jpg" },
+        { "id": "dm_003", "name": "Shuffle - Transdimensional Litter Box", "file": "shuffle__a_transdimensional_litter_box_materializes.jpg" },
+        { "id": "dm_004", "name": "Shuffle - Abracrab Lincoln", "file": "shuffle__abracrab_lincoln.jpg" },
+        { "id": "dm_005", "name": "Shuffle - Kraken Upset", "file": "shuffle__a_kraken_emerges_and_hes_super_upset.jpg" },
+        { "id": "dm_006", "name": "Shuffle - Asparagus Bun Dragon", "file": "shuffle__an_asparagus_bun_dragon_appears.jpg" },
+        { "id": "dm_007", "name": "Shuffle - Toilet Werewolf", "file": "shuffle__discover_you_have_a_toilet_werewolf.jpg" },
+        { "id": "dm_008", "name": "Shuffle - Crack With Baby Owl", "file": "shuffle__smoke_some_crack_with_a_baby_owl.jpg" },
+        { "id": "dm_009", "name": "Shuffle Now - Magic Show", "file": "shuffle_now__watch_an_unimpressive_magic_show.jpg" },
+        { "id": "dm_010", "name": "Shuffle Now - Unravel", "file": "shuffle_now__don_t_completely_unravel.jpg" }
+      ]
+    },
+    "draw_from_bottom": {
+      "name": "Draw From Bottom",
+      "description": "Draw the bottom card of the deck instead of the top",
+      "cards": [
+        { "id": "dm_011", "name": "Draw From Bottom", "file": "draw_from_bottom__draw_from_the_bottom_take_a_big_bite_of_your_coward_sandwich.jpg" }
+      ]
+    },
+    "swap_top_and_bottom": {
+      "name": "Swap Top And Bottom",
+      "description": "Swap the top and bottom cards of the deck",
+      "cards": [
+        { "id": "dm_012", "name": "Swap Top And Bottom", "file": "swap_top_and_bottom.jpg" }
+      ]
+    },
+    "garbage_collection": {
+      "name": "Garbage Collection",
+      "description": "Discard the top 5 cards from the deck",
+      "cards": [
+        { "id": "dm_013", "name": "Garbage Collection", "file": "garbage_collection.jpg" }
+      ]
+    },
+    "catomic_bomb": {
+      "name": "Catomic Bomb",
+      "description": "Remove all explosive cards from the deck",
+      "cards": [
+        { "id": "dm_014", "name": "Catomic Bomb", "file": "catomic_bomb.jpg" }
+      ]
+    },
+    "mark": {
+      "name": "Mark",
+      "description": "Look at the top 5 cards and place one on top of the deck",
+      "cards": [
+        { "id": "dm_015", "name": "Mark", "file": "mark.jpg" }
+      ]
+    },
+    "bury": {
+      "name": "Bury",
+      "description": "Place a card from your hand into the deck at any position",
+      "cards": [
+        { "id": "dm_016", "name": "Bury - Cat Watches", "file": "bury__clean_up_while_your_cat_watches.jpg" },
+        { "id": "dm_017", "name": "Bury - Buried Secret", "file": "bury__something_that_probably_shouldnt_be_buried.jpg" }
+      ]
+    },
+    "dig_deeper": {
+      "name": "Dig Deeper",
+      "description": "Draw 3 cards, keep 1, put the rest back on top of the deck",
+      "cards": [
+        { "id": "dm_018", "name": "Dig Deeper - Bargained For", "file": "dig_deeper__get_more_than_you_bargained_for.jpg" },
+        { "id": "dm_019", "name": "Dig Deeper - Devil Deal", "file": "dig_deeper__make_a_deal_with_a_devil_in_a_bad_disguise.jpg" },
+        { "id": "dm_020", "name": "Dig Deeper - Zombie Strength", "file": "dig_deeper__pity_the_zombie_with_zero_upper_body_strength.jpg" },
+        { "id": "dm_021", "name": "Dig Deeper - Dying Garden", "file": "dig_deeper__tend_to_your_dying_garden.jpg" }
+      ]
+    },
+    "favor": {
+      "name": "Favor",
+      "description": "Choose another player; they must give you one card from their hand",
+      "cards": [
+        { "id": "sf_004", "name": "Peanut Butter Belly Button", "file": "favor__rub_peanut_butter_on_your_belly_button.jpg" },
+        { "id": "sf_005", "name": "Party Squirrels", "file": "favor__get_enslaved_by_party_squirrels.jpg" },
+        { "id": "sf_006", "name": "Beard Sailing", "file": "favor__take_your_friends_beard_sailing.jpg" },
+        { "id": "sf_007", "name": "New Palindrome", "file": "favor__teach_someone_a_new_palindrome.jpg" },
+        { "id": "sf_008", "name": "Fall In Love", "file": "favor__fall_so_deeply_in_love.jpg" },
+        { "id": "sf_009", "name": "Horsey Ride", "file": "favour__give_a_horsey_ride_to_a_horse.jpg" }
+      ]
+    },
+    "clone": {
+      "name": "Clone",
+      "description": "Mimics the card played right before it — becomes whatever card is directly beneath it in the discard pile",
+      "cards": [
+        { "id": "sf_011", "name": "Clone - Work Out Kinks", "file": "clone__work_out_the_kinks_later.jpg" },
+        { "id": "sf_012", "name": "Clone - Voodoo Dolls", "file": "clone__make_your_voodoo_dolls_do_all_the_dirty_work.jpg" },
+        { "id": "sf_013", "name": "Clone - Nosfera Twos", "file": "clone__find_a_pair_of_nosfera_twos.jpg" }
+      ]
+    },
+    "cat_cards": {
+      "name": "Cat Cards",
+      "description": "Collect pairs to steal cards from other players",
+      "cards": [
+        { "id": "cc_001", "name": "Tacocat", "file": "tacocat.jpg" },
+        { "id": "cc_002", "name": "Cattermelon", "file": "cattermelon.jpg" },
+        { "id": "cc_003", "name": "Hairy Potato Cat", "file": "hairy_potato_cat.jpg" },
+        { "id": "cc_004", "name": "Beard Cat", "file": "beard_cat.jpg" },
+        { "id": "cc_005", "name": "Rainbow Ralphing Cat", "file": "rainbow_ralphing_cat.jpg" },
+        { "id": "cc_006", "name": "Schrodinger", "file": "cat_s_schrodinger__cats_schrodinger.jpg" },
+        { "id": "cc_007", "name": "Momma Cat", "file": "overly_prolific_momma_cat__momma_cat.jpg" },
+        { "id": "cc_008", "name": "Bikini Cat", "file": "bikini_cat.jpg" },
+        { "id": "cc_009", "name": "Shy Bladder Cat", "file": "shy_bladder_cat.jpg" },
+        { "id": "cc_010", "name": "Zombie Cat", "file": "ate_his_own_eyeball_zombie_cat__zombie_cat.jpg" },
+        { "id": "cc_011", "name": "Feral Cat", "file": "feral_cat.jpg" },
+        { "id": "cc_012", "name": "Vampire Cat", "file": "vampire_cat.jpg" },
+        { "id": "cc_013", "name": "De-Cat-Ipated", "file": "de_cat_ipated.jpg" },
+        { "id": "cc_014", "name": "Cat O Lantern", "file": "cat_o_lantern.jpg" },
+        { "id": "cc_015", "name": "Electrocat", "file": "electrocat.jpg" },
+        { "id": "cc_016", "name": "Mercat", "file": "mercat.jpg" },
+        { "id": "cc_017", "name": "Knight Cat", "file": "knight_cat.jpg" },
+        { "id": "cc_018", "name": "Horse Cat", "file": "horse_cat.jpg" },
+        { "id": "cc_019", "name": "Troll Cat", "file": "troll_cat.jpg" },
+        { "id": "cc_020", "name": "Cat Henge", "file": "cat_henge.jpg" },
+        { "id": "cc_021", "name": "Kit Tea Cat", "file": "kit_tea_cat.jpg" },
+        { "id": "cc_022", "name": "Telephone Boxcat", "file": "telephone_boxcat.jpg" },
+        { "id": "cc_023", "name": "Loch Ness Kitty", "file": "loch_ness_kitty.jpg" },
+        { "id": "cc_024", "name": "Football Cat", "file": "football_cat.jpg" },
+        { "id": "cc_025", "name": "Barking Kitten - Dog House", "file": "barking_kitten__dog_house.jpg" },
+        { "id": "cc_026", "name": "Barking Kitten - Fence", "file": "barking_kitten__fence.jpg" }
+      ]
+    }
+  }
+}

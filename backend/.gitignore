@@ -1,0 +1,6 @@
+# Go binary
+server
+tmp
+
+# Vendor (if used)
+vendor/
