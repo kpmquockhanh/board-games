@@ -1,67 +1,48 @@
 <template>
   <div class="game">
-    <div class="game-info">
-      <div class="game-info-left">
-        <span class="room-name-pill" v-if="store.roomName">{{ store.roomName }}</span>
-        <span class="turn-pill" :class="{ myturn: store.isMyTurn, spectating: store.amISpectating }">
-          {{ store.amISpectating ? 'Spectating' : (store.isMyTurn ? 'Your turn!' : (store.gameState?.turn || '') + "'s turn") }}
-        </span>
-        <span
-          v-if="store.roomSettings.turnTimer > 0 && store.turnTimeLeft > 0"
-          class="timer-pill"
-          :class="{ urgent: store.turnTimeLeft <= 10 }"
-          role="timer"
-          aria-live="polite"
-        >
-          {{ store.turnTimeLeft }}s
-        </span>
+    <header class="game-header">
+      <div class="header-left">
+        <span class="game-title">🔥 Exploding Kitchen 2</span>
       </div>
-      <div class="game-meta-actions">
-        <button
-          class="meta-btn"
-          aria-label="Leave room"
-          @click="$emit('leave')"
-        >
-          <LogOut :size="16" />
+      <div class="header-right">
+        <button class="header-btn settings-btn" aria-label="Settings">
+          <Settings :size="18" />
         </button>
-        <button
-          v-if="isHost"
-          class="meta-btn meta-btn-danger"
-          aria-label="Delete room"
-          @click="$emit('delete')"
-        >
-          <Trash2 :size="16" />
+        <button class="header-btn leave-btn" @click="$emit('leave')">
+          <LogOut :size="16" class="leave-icon" />
+          <span class="leave-text">Leave Game</span>
         </button>
       </div>
+    </header>
+
+    <div class="game-body">
+      <GameLog />
+
+      <GameTable ref="gameTableRef" @drawCard="store.drawCard()" />
+
+      <DefuseModal />
+      <PositionPickerModal />
+      <TargetSelectModal />
+      <CardNameInputModal />
+      <DiscardPickerModal />
+      <GarbageCollectionModal />
+      <FavorModal />
+      <NopeOverlay />
+      <PeekOverlay />
+
+      <GameHand
+        @cardClick="onCardClick"
+        @playSelected="store.playSelected()"
+        @playNope="onPlayNope"
+        @leave="$emit('leave')"
+      />
     </div>
-
-    <GameTable ref="gameTableRef" />
-
-    <DefuseModal />
-    <PositionPickerModal />
-    <TargetSelectModal />
-    <CardNameInputModal />
-    <DiscardPickerModal />
-    <GarbageCollectionModal />
-    <FavorModal />
-    <NopeOverlay />
-    <PeekOverlay />
-
-    <GameHand
-      @cardClick="onCardClick"
-      @drawCard="store.drawCard()"
-      @playSelected="store.playSelected()"
-      @playNope="onPlayNope"
-      @leave="$emit('leave')"
-    />
-
-    <GameLog />
   </div>
 </template>
 
 <script setup>
 import { useEkStore } from '../../stores/explodingKitchen'
-import { LogOut, Trash2 } from '@lucide/vue'
+import { Settings, LogOut } from '@lucide/vue'
 import GameTable from './GameTable.vue'
 import GameHand from './GameHand.vue'
 import GameLog from './GameLog.vue'
@@ -104,141 +85,147 @@ function onPlayNope() {
 
 <style scoped>
 .game {
-  max-width: 1000px;
-  margin: 0 auto;
-  padding: 20px;
+  width: 100%;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
-.game-info {
+/* ─── Header ─── */
+
+.game-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 16px;
-  flex-wrap: wrap;
-  gap: 10px;
+  padding: 12px 24px;
+  background: rgba(28, 21, 18, 0.85);
+  backdrop-filter: blur(8px);
+  border-bottom: 1px solid var(--line);
+  z-index: 100;
+  flex-shrink: 0;
 }
 
-.game-info-left {
+.header-left {
   display: flex;
   align-items: center;
-  gap: 10px;
-  flex-wrap: wrap;
+  gap: 12px;
 }
 
-.turn-pill {
-  font-size: 0.78rem;
-  padding: 6px 14px;
-  border-radius: 100px;
-  background: rgba(238, 194, 92, 0.12);
-  color: var(--gold);
-  border: 1px solid rgba(238, 194, 92, 0.3);
-}
-
-.room-name-pill {
-  font-size: 0.85rem;
-  padding: 6px 14px;
-  border-radius: 100px;
-  background: rgba(238, 194, 92, 0.12);
+.game-title {
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 700;
+  font-size: 1.1rem;
   color: var(--steam-cream);
-  border: 1px solid rgba(238, 194, 92, 0.3);
-  font-weight: 600;
+  white-space: nowrap;
 }
 
-.turn-pill.myturn {
-  color: var(--chili-orange);
-  border-color: rgba(226, 99, 44, 0.3);
-  background: rgba(226, 99, 44, 0.12);
-}
-
-.turn-pill.spectating {
-  color: var(--mild-cream);
-  border-color: var(--line);
-  background: rgba(255, 255, 255, 0.05);
-}
-
-.timer-pill {
-  font-size: 0.78rem;
-  padding: 6px 14px;
-  border-radius: 100px;
-  background: rgba(127, 168, 118, 0.12);
-  color: #7fa876;
-  border: 1px solid rgba(127, 168, 118, 0.3);
-  font-weight: 600;
-}
-
-.timer-pill.urgent {
-  color: var(--broth-red);
-  border-color: rgba(183, 41, 31, 0.3);
-  background: rgba(183, 41, 31, 0.12);
-  animation: pulse 1s ease-in-out infinite;
-}
-
-@keyframes pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.6; }
-}
-
-/* ─── Meta Actions ─── */
-
-.game-meta-actions {
+.header-right {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 10px;
 }
 
-.meta-btn {
+.header-btn {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  border-radius: 10px;
-  border: 1px solid var(--line);
-  background: transparent;
-  color: var(--mild-cream);
+  gap: 6px;
+  border: none;
   cursor: pointer;
+  font-family: inherit;
+  font-weight: 600;
   transition: all var(--ease-standard);
 }
 
-.meta-btn:hover {
+.settings-btn {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: transparent;
+  color: var(--mild-cream);
+  border: 1px solid var(--line);
+}
+
+.settings-btn:hover {
   border-color: var(--chili-orange);
   color: var(--steam-cream);
   background: rgba(226, 99, 44, 0.08);
 }
 
-.meta-btn:active {
-  transform: scale(0.95);
+.leave-btn {
+  padding: 10px 20px;
+  border-radius: 100px;
+  background: var(--broth-red);
+  color: var(--steam-cream);
+  font-size: 0.85rem;
 }
 
-.meta-btn:focus-visible {
-  outline: 2px solid var(--chili-orange);
-  outline-offset: 2px;
+.leave-btn:hover {
+  filter: brightness(1.15);
+  transform: translateY(-1px);
 }
 
-.meta-btn svg {
-  width: 16px;
-  height: 16px;
+.leave-btn:active {
+  transform: scale(0.97);
 }
 
-.meta-btn-danger {
-  border-color: rgba(183, 41, 31, 0.3);
-}
+/* ─── Body ─── */
 
-.meta-btn-danger:hover {
-  border-color: var(--broth-red);
-  color: var(--broth-red);
-  background: rgba(183, 41, 31, 0.08);
+.game-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  position: relative;
+  overflow: hidden;
 }
 
 /* ─── Responsive ─── */
 
 @media (max-width: 640px) {
-  .game {
-    padding: 12px;
+  .game-header {
+    padding: 6px 10px;
   }
 
-  .game-info {
-    gap: 8px;
+  .game-title {
+    font-size: 0.8rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    max-width: 140px;
+  }
+
+  .header-right {
+    gap: 4px;
+  }
+
+  .settings-btn {
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+  }
+
+  .leave-btn {
+    padding: 0;
+    width: 32px;
+    height: 32px;
+    border-radius: 8px;
+    gap: 0;
+    justify-content: center;
+  }
+
+  .leave-text {
+    display: none;
+  }
+
+  .leave-icon {
+    margin: 0;
+    width: 14px;
+    height: 14px;
+  }
+
+  .settings-btn svg {
+    width: 14px;
+    height: 14px;
   }
 }
 </style>
