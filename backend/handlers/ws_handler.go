@@ -24,6 +24,10 @@ var upgrader = websocket.Upgrader{
 func (h *Handler) HandleWS(c *gin.Context) {
 	room := c.Query("room")
 	player := c.Query("player")
+	// The browser tab behind this socket, so the one its previous page left
+	// open can be recognised as the same player and dropped rather than
+	// treated as a second one.
+	session := c.Query("session")
 	if room == "" {
 		room = "default"
 	}
@@ -35,14 +39,32 @@ func (h *Handler) HandleWS(c *gin.Context) {
 	}
 
 	client := &ws.Client{
-		Conn:   conn,
-		Room:   room,
-		Player: player,
-		Send:   make(chan []byte, 256),
-		Hub:    h.hub,
+		Conn:    conn,
+		Room:    room,
+		Player:  player,
+		Session: session,
+		// Claimed before registering, so this socket's own teardown carries an
+		// epoch no later than the seat's and a reload that arrives afterwards
+		// still supersedes it.
+		Epoch: h.arrive(room, player),
+		Send:  make(chan []byte, 256),
+		Hub:   h.hub,
 	}
 
 	h.hub.Register(client)
+
+	// Opening a socket is activity in itself: a table sitting in the lobby
+	// between games sends no actions, and the reaper must not mistake that
+	// for an empty room.
+	if r, err := h.store.GetRoom(room); err == nil && r != nil {
+		h.touch(r.ID)
+		// The socket is the real signal that someone is back, and it arrives
+		// whether or not they went through the join endpoint first. Either one
+		// may be the first to find the seat stamped, so both announce it.
+		if player != "" {
+			h.markBack(r.ID, room, player)
+		}
+	}
 
 	if player != "" {
 		h.sendCurrentStateToClient(client, room, player)
@@ -58,41 +80,27 @@ func (h *Handler) sendCurrentStateToClient(client *ws.Client, roomKey, playerNam
 		return
 	}
 
-	players, _ := h.store.GetRoomPlayers(room.ID)
-	playerNames := make([]string, 0, len(players))
-	playerColors := make(map[string]string)
-	for _, p := range players {
-		playerNames = append(playerNames, p.PlayerName)
-		playerColors[p.PlayerName] = p.Color
-	}
+	var payload []byte
 
 	if room.Game == "ek" {
-		gs := h.getEKState(roomKey)
+		// Always a view: the stored snapshot holds every hand and the deck.
+		// The room lock is held while reading, since actions mutate in place.
+		mu := h.getEKMutex(roomKey)
+		mu.Lock()
+		gs := h.loadEKState(roomKey, room.ID)
 		if gs != nil {
-			payload, _ := json.Marshal(gs)
-			msg := models.WSMessage{
-				Type:    "state_updated",
-				Room:    roomKey,
-				Payload: payload,
-			}
-			data, _ := json.Marshal(msg)
-			select {
-			case client.Send <- data:
-			default:
-			}
+			payload, _ = json.Marshal(gs.ViewFor(playerName))
+		}
+		mu.Unlock()
+		if gs == nil {
 			return
 		}
-	}
-
-	stateJSON, ok, _ := h.store.GetLatestSnapshot(room.ID)
-	if ok && stateJSON != "" {
-		var payload []byte
+	} else {
+		stateJSON, ok, _ := h.store.GetLatestSnapshot(room.ID)
+		if !ok || stateJSON == "" {
+			return
+		}
 		switch room.Game {
-		case "ek":
-			var raw models.EKRoomState
-			if json.Unmarshal([]byte(stateJSON), &raw) == nil && raw.GameState != nil {
-				payload, _ = json.Marshal(raw.GameState)
-			}
 		case "hotpot":
 			var raw models.HotpotState
 			if json.Unmarshal([]byte(stateJSON), &raw) == nil {
@@ -101,19 +109,19 @@ func (h *Handler) sendCurrentStateToClient(client *ws.Client, roomKey, playerNam
 		default:
 			payload = []byte(stateJSON)
 		}
-		if payload != nil {
-			msg := models.WSMessage{
-				Type:    "state_updated",
-				Room:    roomKey,
-				Payload: payload,
-			}
-			data, _ := json.Marshal(msg)
-			select {
-			case client.Send <- data:
-			default:
-			}
-		}
 	}
+
+	if payload == nil {
+		return
+	}
+
+	data, _ := json.Marshal(models.WSMessage{
+		Type:    "state_updated",
+		Room:    roomKey,
+		Player:  playerName,
+		Payload: payload,
+	})
+	h.hub.Send(client, data)
 }
 
 func clientReadPump(c *ws.Client) {

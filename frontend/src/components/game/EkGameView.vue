@@ -2,13 +2,11 @@
   <div class="game">
     <header class="game-header">
       <div class="header-left">
-        <span class="game-title">🔥 Exploding Kitchen 2</span>
+        <span class="title-mark" aria-hidden="true"><Flame :size="16" /></span>
+        <span class="game-title">Exploding Kitchen 2</span>
       </div>
       <div class="header-right">
-        <button class="header-btn settings-btn" aria-label="Settings">
-          <Settings :size="18" />
-        </button>
-        <button class="header-btn leave-btn" @click="$emit('leave')">
+        <button class="header-btn leave-btn" data-testid="game-leave" aria-label="Leave game" @click="$emit('leave')">
           <LogOut :size="16" class="leave-icon" />
           <span class="leave-text">Leave Game</span>
         </button>
@@ -25,24 +23,31 @@
       <TargetSelectModal />
       <CardNameInputModal />
       <DiscardPickerModal />
+      <ChooseCardModal />
       <GarbageCollectionModal />
       <FavorModal />
       <NopeOverlay />
       <PeekOverlay />
 
       <GameHand
+        ref="gameHandRef"
         @cardClick="onCardClick"
         @playSelected="store.playSelected()"
         @playNope="onPlayNope"
+        @passNope="store.passNope()"
         @leave="$emit('leave')"
       />
+
+      <DrawFlight ref="drawFlightRef" />
     </div>
   </div>
 </template>
 
 <script setup>
+import { ref, watch, nextTick } from 'vue'
 import { useEkStore } from '../../stores/explodingKitchen'
-import { Settings, LogOut } from '@lucide/vue'
+import { LogOut, Flame } from '@lucide/vue'
+import DrawFlight from './DrawFlight.vue'
 import GameTable from './GameTable.vue'
 import GameHand from './GameHand.vue'
 import GameLog from './GameLog.vue'
@@ -51,12 +56,13 @@ import PositionPickerModal from './PositionPickerModal.vue'
 import TargetSelectModal from './TargetSelectModal.vue'
 import CardNameInputModal from './CardNameInputModal.vue'
 import DiscardPickerModal from './DiscardPickerModal.vue'
+import ChooseCardModal from './ChooseCardModal.vue'
 import GarbageCollectionModal from './GarbageCollectionModal.vue'
 import FavorModal from './FavorModal.vue'
 import NopeOverlay from './NopeOverlay.vue'
 import PeekOverlay from './PeekOverlay.vue'
 
-const props = defineProps({
+defineProps({
   isHost: { type: Boolean, default: false },
 })
 
@@ -64,10 +70,37 @@ defineEmits(['leave', 'delete'])
 
 const store = useEkStore()
 
+const gameTableRef = ref(null)
+const gameHandRef = ref(null)
+const drawFlightRef = ref(null)
+
+// A card drawn from the deck is already in the hand by the time we hear about
+// it, so the flight is a ghost copy travelling to where the real card sits.
+// The card stays hidden until the ghost lands on it.
+watch(
+  () => store.drawFlight,
+  async (drawn) => {
+    if (!drawn) return
+    // Wait for the fan to lay out, or the card has no box to fly to yet.
+    await nextTick()
+    const deckRect = gameTableRef.value?.getDeckRect()
+    const cardRect = gameHandRef.value?.getCardRect(drawn.uid)
+    try {
+      await drawFlightRef.value?.run(drawn.cardId, deckRect, cardRect)
+    } finally {
+      // Reveals the card whether or not the flight actually ran — a missing
+      // rect or reduced motion must not leave it invisible.
+      store.clearDrawFlight()
+    }
+  }
+)
+
 function onCardClick(idx) {
-  if (store.nopeWindow.active && !store.isMyTurn) {
+  // During a window the only card that can be picked is a Nope — including by
+  // the player who is being Noped and may counter.
+  if (store.nopeWindow.active) {
     const cardId = store.myHand[idx]
-    if (store.getCategoryName(cardId) === 'Nope') {
+    if (store.canINope && store.getCategoryName(cardId) === 'Nope') {
       store.selectCard(idx)
     }
     return
@@ -90,6 +123,7 @@ function onPlayNope() {
   display: flex;
   flex-direction: column;
   overflow: hidden;
+  background: var(--paper);
 }
 
 /* ─── Header ─── */
@@ -98,10 +132,10 @@ function onPlayNope() {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 24px;
-  background: rgba(28, 21, 18, 0.85);
-  backdrop-filter: blur(8px);
-  border-bottom: 1px solid var(--line);
+  gap: 10px;
+  padding: 10px 20px;
+  background: var(--surface);
+  border-bottom: var(--edge-w) solid var(--edge);
   z-index: 100;
   flex-shrink: 0;
 }
@@ -109,21 +143,39 @@ function onPlayNope() {
 .header-left {
   display: flex;
   align-items: center;
-  gap: 12px;
+  gap: 10px;
+  min-width: 0;
+}
+
+.title-mark {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 30px;
+  height: 30px;
+  flex-shrink: 0;
+  border-radius: 10px;
+  border: 2.5px solid var(--edge);
+  background: var(--chili);
+  color: var(--ink);
+  transform: rotate(-6deg);
 }
 
 .game-title {
   font-family: 'Baloo 2', sans-serif;
-  font-weight: 700;
-  font-size: 1.1rem;
-  color: var(--steam-cream);
+  font-weight: 800;
+  font-size: 1.15rem;
+  color: var(--ink);
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .header-right {
   display: flex;
   align-items: center;
   gap: 10px;
+  flex-shrink: 0;
 }
 
 .header-btn {
@@ -131,43 +183,30 @@ function onPlayNope() {
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: none;
   cursor: pointer;
-  font-family: inherit;
-  font-weight: 600;
-  transition: all var(--ease-standard);
-}
-
-.settings-btn {
-  width: 38px;
-  height: 38px;
-  border-radius: 12px;
-  background: transparent;
-  color: var(--mild-cream);
-  border: 1px solid var(--line);
-}
-
-.settings-btn:hover {
-  border-color: var(--chili-orange);
-  color: var(--steam-cream);
-  background: rgba(226, 99, 44, 0.08);
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 800;
+  border: 2.5px solid var(--edge);
+  box-shadow: 0 3px 0 var(--edge);
+  transition: var(--transition-interactive);
 }
 
 .leave-btn {
-  padding: 10px 20px;
-  border-radius: 100px;
-  background: var(--broth-red);
-  color: var(--steam-cream);
-  font-size: 0.85rem;
+  padding: 8px 18px;
+  min-height: 44px;
+  border-radius: var(--radius-sm);
+  background: var(--broth);
+  color: var(--surface);
+  font-size: 0.9rem;
 }
 
 .leave-btn:hover {
-  filter: brightness(1.15);
-  transform: translateY(-1px);
+  background: #b81f1f;
 }
 
 .leave-btn:active {
-  transform: scale(0.97);
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--edge);
 }
 
 /* ─── Body ─── */
@@ -187,30 +226,29 @@ function onPlayNope() {
     padding: 6px 10px;
   }
 
+  .title-mark {
+    width: 26px;
+    height: 26px;
+    border-radius: 8px;
+  }
+
   .game-title {
-    font-size: 0.8rem;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    max-width: 140px;
+    font-size: 0.9rem;
+    max-width: 150px;
   }
 
   .header-right {
     gap: 4px;
   }
 
-  .settings-btn {
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
-  }
-
+  /* Icon-only at this width, but the tap target stays at 44px — the label
+     moves to aria-label rather than disappearing outright. */
   .leave-btn {
     padding: 0;
-    width: 32px;
-    height: 32px;
-    border-radius: 8px;
+    width: 44px;
+    height: 44px;
+    border-radius: 12px;
     gap: 0;
-    justify-content: center;
   }
 
   .leave-text {
@@ -219,13 +257,8 @@ function onPlayNope() {
 
   .leave-icon {
     margin: 0;
-    width: 14px;
-    height: 14px;
-  }
-
-  .settings-btn svg {
-    width: 14px;
-    height: 14px;
+    width: 18px;
+    height: 18px;
   }
 }
 </style>

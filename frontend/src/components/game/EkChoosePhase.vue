@@ -6,11 +6,11 @@
       <h1>Exploding Kitchen</h1>
       <p>A card game of cooking chaos. Draw cards, avoid the exploding kitchen, and be the last chef standing.</p>
       <div class="choose-actions">
-        <button class="choose-btn create" @click="$emit('create')">
+        <button class="choose-btn create" data-testid="ek-choose-create" @click="$emit('create')">
           <span>Create Room</span>
           <small>Start a new game and invite friends</small>
         </button>
-        <button class="choose-btn join" @click="$emit('join')">
+        <button class="choose-btn join" data-testid="ek-choose-join" @click="$emit('join')">
           <span>Join Room</span>
           <small>Enter a room key or pick an active room</small>
         </button>
@@ -29,7 +29,7 @@ defineEmits(['create', 'join'])
   position: fixed;
   inset: 0;
   z-index: var(--z-overlay);
-  background: rgba(21, 15, 12, 0.94);
+  background: var(--paper);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -37,56 +37,85 @@ defineEmits(['create', 'join'])
   padding: 20px;
 }
 
+/* The speed-line wedge and warm glow are what stop a flat light ground from
+   reading as an empty page. Decorative only, so it sits behind everything. */
+.choose-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 90, 43, 0.22), rgba(255, 232, 194, 0) 58%),
+    repeating-linear-gradient(-38deg, #ffdfae 0 26px, var(--paper) 26px 52px);
+  pointer-events: none;
+}
+
 .close-btn {
   position: absolute;
   top: 12px;
   right: 12px;
-  background: none;
-  border: 1px solid var(--line);
-  color: var(--mild-cream);
-  width: 30px;
-  height: 30px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  color: var(--ink);
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  font-size: 0.85rem;
+  box-shadow: 0 3px 0 var(--edge);
   cursor: pointer;
   font-family: inherit;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: border-color var(--ease-standard), color var(--ease-standard);
+  transition: var(--transition-interactive);
 }
 
 .close-btn:hover {
-  border-color: var(--broth-red);
-  color: var(--broth-red);
+  background: var(--broth);
+  color: var(--surface);
+}
+
+.close-btn:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--edge);
 }
 
 .choose-card {
   position: relative;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 36px 32px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 34px 28px;
   max-width: 400px;
   width: 100%;
   text-align: center;
 }
 
 .choose-icon {
-  font-size: 2rem;
-  display: block;
-  margin-bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 72px;
+  height: 72px;
+  margin-bottom: 14px;
+  background: var(--chili);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: 24px;
+  box-shadow: var(--lift);
+  color: var(--ink);
+  transform: rotate(-6deg);
 }
 
 .choose-card h1 {
-  font-size: 1.7rem;
+  font-size: 2.1rem;
+  line-height: 1.05;
   margin-bottom: 8px;
+  color: var(--ink);
 }
 
 .choose-card p {
-  color: var(--mild-cream);
-  opacity: 0.8;
-  font-size: 0.92rem;
+  color: var(--muted-cream);
+  font-size: 0.95rem;
+  font-weight: 700;
   line-height: 1.5;
   margin-bottom: 22px;
 }
@@ -94,7 +123,7 @@ defineEmits(['create', 'join'])
 .choose-actions {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
 }
 
 .choose-btn {
@@ -102,29 +131,48 @@ defineEmits(['create', 'join'])
   flex-direction: column;
   align-items: center;
   gap: 4px;
-  padding: 18px 20px;
-  border-radius: 14px;
-  border: 1px solid var(--line);
-  background: var(--charcoal);
-  color: var(--steam-cream);
+  padding: 16px 20px;
+  min-height: 72px;
+  border-radius: var(--radius-md);
+  border: var(--edge-w) solid var(--edge);
+  box-shadow: var(--lift);
+  background: var(--surface);
+  color: var(--ink);
   cursor: pointer;
-  transition: all var(--ease-standard);
+  transition: var(--transition-interactive);
   font-family: inherit;
 }
 
+/* Create is the primary path, so it takes the one saturated fill on the
+   screen; join stays on paper white. */
+.choose-btn.create {
+  background: var(--gold);
+}
+
 .choose-btn:hover {
-  border-color: var(--chili-orange);
   transform: translateY(-2px);
+  box-shadow: var(--lift-lg);
+}
+
+.choose-btn:active {
+  transform: translateY(4px);
+  box-shadow: 0 1px 0 var(--edge);
 }
 
 .choose-btn span {
-  font-weight: 700;
-  font-size: 1rem;
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 800;
+  font-size: 1.15rem;
 }
 
 .choose-btn small {
   font-size: 0.78rem;
+  font-weight: 700;
   color: var(--muted-cream);
+}
+
+.choose-btn.create small {
+  color: #6b4a00;
 }
 
 @media (max-width: 640px) {
@@ -134,7 +182,7 @@ defineEmits(['create', 'join'])
   }
 
   .choose-card h1 {
-    font-size: 1.4rem;
+    font-size: 1.7rem;
   }
 
   .choose-btn {

@@ -1,14 +1,16 @@
 <template>
-  <div v-if="store.modal.show" class="modal" ref="modalRef">
-    <div class="modal-card" role="dialog" aria-modal="true" :aria-labelledby="titleId">
-      <h2 :id="titleId">{{ store.modal.title }}</h2>
-      <p>{{ store.modal.desc }}</p>
-      <div class="modal-actions">
-        <button class="btn" ref="firstBtn" @click="store.modal.resolve(true)">Yes, defuse!</button>
-        <button class="btn btn-secondary" @click="store.modal.resolve(false)">No, let me explode</button>
+  <Transition name="modal">
+    <div v-if="store.modal.show" class="modal" data-testid="defuse-modal" ref="modalRef">
+      <div class="modal-card" role="dialog" aria-modal="true" :aria-labelledby="titleId">
+        <h2 :id="titleId">{{ store.modal.title }}</h2>
+        <p>{{ store.modal.desc }}</p>
+        <div class="modal-actions">
+          <button class="btn" data-testid="defuse-yes" ref="firstBtn" @click="store.modal.resolve(true)">Yes, defuse!</button>
+          <button class="btn btn-secondary" data-testid="defuse-no" @click="store.modal.resolve(false)">No, let me explode</button>
+        </div>
       </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <script setup>
@@ -33,7 +35,9 @@ watch(() => store.modal.show, async (show) => {
   position: fixed;
   inset: 0;
   z-index: var(--z-modal);
-  background: rgba(21, 15, 12, 0.88);
+  /* Ink at 58% rather than a near-opaque black — on a light ground the game
+     behind the dialog should stay legible, not be blacked out. */
+  background: rgba(27, 14, 6, 0.58);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -41,24 +45,26 @@ watch(() => store.modal.show, async (show) => {
 }
 
 .modal-card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 32px 28px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 30px 26px;
   max-width: 420px;
   width: 100%;
   text-align: center;
 }
 
 .modal-card h2 {
-  font-size: 1.3rem;
-  margin-bottom: 12px;
+  font-size: 1.45rem;
+  color: var(--ink);
+  margin-bottom: 10px;
 }
 
 .modal-card p {
-  color: var(--mild-cream);
-  opacity: 0.8;
-  font-size: 0.9rem;
+  color: var(--muted-cream);
+  font-size: 0.92rem;
+  font-weight: 700;
   line-height: 1.5;
   margin-bottom: 18px;
 }

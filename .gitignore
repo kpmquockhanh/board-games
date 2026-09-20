@@ -35,3 +35,6 @@ npm-debug.log*
 
 # Docker
 docker-compose.override.yml
+
+# Local SQLite database
+backend/data/

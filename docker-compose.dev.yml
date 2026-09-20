@@ -36,7 +36,10 @@ services:
     restart: unless-stopped
 
   sqlite-web:
-    image: coleifer/sqlite-web
+    # Built locally instead of using coleifer/sqlite-web, which ships
+    # linux/amd64 only and would run emulated on Apple Silicon.
+    build:
+      context: ./docker/sqlite-web
     ports:
       - "8081:8080"
     volumes:

@@ -25,7 +25,10 @@ func NewSQLite(dbPath string) (*SQLiteStorage, error) {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+	// foreign_keys is OFF by default in SQLite, so the ON DELETE CASCADE on
+	// room_players and timelines never fired: every deleted room left its rows
+	// behind. The driver applies _pragma to each new connection.
+	db, err := sql.Open("sqlite", dbPath+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(ON)")
 	if err != nil {
 		return nil, err
 	}
@@ -50,7 +53,8 @@ func migrate(db *sql.DB) error {
 			max_players INTEGER DEFAULT 6,
 			status      TEXT DEFAULT 'active',
 			created_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
-			updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP
+			updated_at  DATETIME DEFAULT CURRENT_TIMESTAMP,
+			last_activity_at DATETIME DEFAULT CURRENT_TIMESTAMP
 		);
 		CREATE INDEX IF NOT EXISTS idx_rooms_game_key ON rooms(game, room_key);
 		CREATE INDEX IF NOT EXISTS idx_rooms_status ON rooms(status);
@@ -63,6 +67,7 @@ func migrate(db *sql.DB) error {
 			ready       INTEGER DEFAULT 0,
 			joined_at   DATETIME DEFAULT CURRENT_TIMESTAMP,
 			left_at     DATETIME,
+			disconnected_at DATETIME,
 			UNIQUE(room_id, player_name)
 		);
 		CREATE INDEX IF NOT EXISTS idx_room_players_room ON room_players(room_id);
@@ -87,6 +92,55 @@ func migrate(db *sql.DB) error {
 	// Migration: add name column to rooms if missing (for existing DBs)
 	_, _ = db.Exec("ALTER TABLE rooms ADD COLUMN name TEXT NOT NULL DEFAULT ''")
 
+	// Migration: last_activity_at is what the reaper measures a room's silence
+	// by. updated_at cannot serve: only UpdateRoomStatus touches it, so a room
+	// in a 40-minute game looks exactly as stale as one abandoned at creation.
+	// SQLite rejects a non-constant default on ADD COLUMN, so it lands
+	// nullable and is backfilled from the best timestamp the row already has.
+	// Migration: disconnected_at separates "dropped" from "left". A mid-game
+	// disconnect keeps the seat, so left_at stays null and the row alone
+	// cannot say how long its player has been gone.
+	_, _ = db.Exec("ALTER TABLE room_players ADD COLUMN disconnected_at DATETIME")
+	if _, err := db.Exec(
+		"CREATE INDEX IF NOT EXISTS idx_room_players_disconnected ON room_players(disconnected_at) WHERE disconnected_at IS NOT NULL",
+	); err != nil {
+		return fmt.Errorf("create disconnected index: %w", err)
+	}
+
+	_, _ = db.Exec("ALTER TABLE rooms ADD COLUMN last_activity_at DATETIME")
+	if _, err := db.Exec(
+		"UPDATE rooms SET last_activity_at = COALESCE(updated_at, created_at) WHERE last_activity_at IS NULL",
+	); err != nil {
+		return fmt.Errorf("backfill last_activity_at: %w", err)
+	}
+	if _, err := db.Exec(
+		"CREATE INDEX IF NOT EXISTS idx_rooms_status_activity ON rooms(status, last_activity_at)",
+	); err != nil {
+		return fmt.Errorf("create activity index: %w", err)
+	}
+
+	// One-time cleanup of the rows orphaned while the cascade was inert.
+	if err := deleteOrphans(db); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// deleteOrphans removes room_players and timelines rows whose room is gone.
+// Harmless once the cascade works: it matches nothing.
+func deleteOrphans(db *sql.DB) error {
+	for _, table := range []string{"room_players", "timelines"} {
+		result, err := db.Exec(
+			"DELETE FROM " + table + " WHERE room_id NOT IN (SELECT id FROM rooms)",
+		)
+		if err != nil {
+			return fmt.Errorf("delete orphaned %s: %w", table, err)
+		}
+		if n, _ := result.RowsAffected(); n > 0 {
+			log.Printf("[storage] deleted %d orphaned %s rows", n, table)
+		}
+	}
 	return nil
 }
 
@@ -104,7 +158,7 @@ func (s *SQLiteStorage) CreateRoom(game string, maxPlayers int, name string) (*m
 	for attempts := 0; attempts < 10; attempts++ {
 		key := generateRoomKey()
 		result, err := s.db.Exec(
-			"INSERT INTO rooms (game, room_key, name, max_players, status) VALUES (?, ?, ?, ?, 'active')",
+			"INSERT INTO rooms (game, room_key, name, max_players, status, last_activity_at) VALUES (?, ?, ?, ?, 'active', CURRENT_TIMESTAMP)",
 			game, key, name, maxPlayers,
 		)
 		if err != nil {
@@ -130,31 +184,35 @@ func (s *SQLiteStorage) CreateRoom(game string, maxPlayers int, name string) (*m
 
 func (s *SQLiteStorage) GetRoom(roomKey string) (*models.Room, error) {
 	var r models.Room
+	var activity scanTime
 	err := s.db.QueryRow(
-		"SELECT id, game, room_key, name, max_players, status, created_at, updated_at FROM rooms WHERE room_key = ?",
+		"SELECT id, game, room_key, name, max_players, status, created_at, updated_at, COALESCE(last_activity_at, updated_at, created_at) FROM rooms WHERE room_key = ?",
 		roomKey,
-	).Scan(&r.ID, &r.Game, &r.RoomKey, &r.Name, &r.MaxPlayers, &r.Status, &r.CreatedAt, &r.UpdatedAt)
+	).Scan(&r.ID, &r.Game, &r.RoomKey, &r.Name, &r.MaxPlayers, &r.Status, &r.CreatedAt, &r.UpdatedAt, &activity)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get room: %w", err)
 	}
+	r.LastActivityAt = activity.Time
 	return &r, nil
 }
 
 func (s *SQLiteStorage) GetRoomByID(roomID int64) (*models.Room, error) {
 	var r models.Room
+	var activity scanTime
 	err := s.db.QueryRow(
-		"SELECT id, game, room_key, name, max_players, status, created_at, updated_at FROM rooms WHERE id = ?",
+		"SELECT id, game, room_key, name, max_players, status, created_at, updated_at, COALESCE(last_activity_at, updated_at, created_at) FROM rooms WHERE id = ?",
 		roomID,
-	).Scan(&r.ID, &r.Game, &r.RoomKey, &r.Name, &r.MaxPlayers, &r.Status, &r.CreatedAt, &r.UpdatedAt)
+	).Scan(&r.ID, &r.Game, &r.RoomKey, &r.Name, &r.MaxPlayers, &r.Status, &r.CreatedAt, &r.UpdatedAt, &activity)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get room by id: %w", err)
 	}
+	r.LastActivityAt = activity.Time
 	return &r, nil
 }
 
@@ -164,6 +222,124 @@ func (s *SQLiteStorage) UpdateRoomStatus(roomID int64, status string) error {
 		status, roomID,
 	)
 	return err
+}
+
+// sqliteLayout is how CURRENT_TIMESTAMP writes a timestamp, in UTC.
+const sqliteLayout = "2006-01-02 15:04:05"
+
+// sqliteTime renders a Go time the way CURRENT_TIMESTAMP stores one, so the
+// two compare correctly as strings.
+func sqliteTime(t time.Time) string {
+	return t.UTC().Format(sqliteLayout)
+}
+
+// scanTime reads a timestamp that may arrive either already converted or as
+// raw text. The driver converts a column declared DATETIME, but a value that
+// has passed through COALESCE has no declared type left and comes back as a
+// string, so both have to be handled.
+type scanTime struct{ Time time.Time }
+
+func (t *scanTime) Scan(v interface{}) error {
+	switch val := v.(type) {
+	case nil:
+		t.Time = time.Time{}
+		return nil
+	case time.Time:
+		t.Time = val
+		return nil
+	case string:
+		return t.parse(val)
+	case []byte:
+		return t.parse(string(val))
+	default:
+		return fmt.Errorf("cannot scan %T as a time", v)
+	}
+}
+
+func (t *scanTime) parse(raw string) error {
+	for _, layout := range []string{sqliteLayout, time.RFC3339Nano, "2006-01-02 15:04:05.999999999-07:00"} {
+		if parsed, err := time.Parse(layout, raw); err == nil {
+			t.Time = parsed.UTC()
+			return nil
+		}
+	}
+	return fmt.Errorf("unrecognised timestamp %q", raw)
+}
+
+// TouchRoom marks the room as having just seen activity.
+func (s *SQLiteStorage) TouchRoom(roomID int64) error {
+	_, err := s.db.Exec(
+		"UPDATE rooms SET last_activity_at = CURRENT_TIMESTAMP WHERE id = ?",
+		roomID,
+	)
+	return err
+}
+
+// ListIdleRooms returns rooms in any of the given statuses whose last activity
+// predates the cutoff. The caller still has to check whether anyone is
+// connected: this only knows what the database knows.
+func (s *SQLiteStorage) ListIdleRooms(statuses []string, cutoff time.Time) ([]models.Room, error) {
+	if len(statuses) == 0 {
+		return nil, nil
+	}
+
+	placeholders := strings.Repeat("?,", len(statuses)-1) + "?"
+	args := make([]interface{}, 0, len(statuses)+1)
+	for _, st := range statuses {
+		args = append(args, st)
+	}
+	args = append(args, sqliteTime(cutoff))
+
+	rows, err := s.db.Query(`
+		SELECT id, game, room_key, name, max_players, status, created_at, updated_at,
+		       COALESCE(last_activity_at, updated_at, created_at) AS activity
+		FROM rooms
+		WHERE status IN (`+placeholders+`)
+		  AND COALESCE(last_activity_at, updated_at, created_at) < ?
+		ORDER BY activity
+	`, args...)
+	if err != nil {
+		return nil, fmt.Errorf("list idle rooms: %w", err)
+	}
+	defer rows.Close()
+
+	var rooms []models.Room
+	for rows.Next() {
+		var r models.Room
+		var activity scanTime
+		if err := rows.Scan(&r.ID, &r.Game, &r.RoomKey, &r.Name, &r.MaxPlayers, &r.Status,
+			&r.CreatedAt, &r.UpdatedAt, &activity); err != nil {
+			continue
+		}
+		r.LastActivityAt = activity.Time
+		rooms = append(rooms, r)
+	}
+	return rooms, rows.Err()
+}
+
+// PruneTimelines trims each room's event log to its newest keep entries.
+// Snapshot rows are never touched: they are the game state, not history.
+func (s *SQLiteStorage) PruneTimelines(keep int) (int64, error) {
+	if keep < 0 {
+		return 0, nil
+	}
+	result, err := s.db.Exec(`
+		DELETE FROM timelines WHERE id IN (
+			SELECT id FROM (
+				SELECT id, ROW_NUMBER() OVER (
+					PARTITION BY room_id ORDER BY created_at DESC, id DESC
+				) AS rn
+				FROM timelines
+				WHERE event_type != 'snapshot'
+			)
+			WHERE rn > ?
+		)
+	`, keep)
+	if err != nil {
+		return 0, fmt.Errorf("prune timelines: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	return n, nil
 }
 
 func (s *SQLiteStorage) ListActiveRooms(game string) ([]models.RoomListItem, error) {
@@ -192,7 +368,7 @@ func (s *SQLiteStorage) ListActiveRooms(game string) ([]models.RoomListItem, err
 
 func (s *SQLiteStorage) AddPlayer(roomID int64, playerName, color string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO room_players (room_id, player_name, color) VALUES (?, ?, ?) ON CONFLICT(room_id, player_name) DO UPDATE SET color = excluded.color, ready = 0, left_at = NULL",
+		"INSERT INTO room_players (room_id, player_name, color) VALUES (?, ?, ?) ON CONFLICT(room_id, player_name) DO UPDATE SET color = excluded.color, ready = 0, left_at = NULL, disconnected_at = NULL",
 		roomID, playerName, color,
 	)
 	return err
@@ -212,6 +388,66 @@ func (s *SQLiteStorage) RemovePlayerByRoomKey(roomKey string, playerName string)
 		roomKey, playerName,
 	)
 	return err
+}
+
+// MarkPlayerDisconnected stamps a player whose socket dropped but whose seat
+// is being kept. Only a seat that is still held can be stamped.
+func (s *SQLiteStorage) MarkPlayerDisconnected(roomID int64, playerName string) error {
+	_, err := s.db.Exec(
+		"UPDATE room_players SET disconnected_at = CURRENT_TIMESTAMP WHERE room_id = ? AND player_name = ? AND left_at IS NULL AND disconnected_at IS NULL",
+		roomID, playerName,
+	)
+	return err
+}
+
+// MarkPlayerConnected clears the stamp when a player comes back. It reports
+// whether a stamp was actually there, which is what tells a routine reconnect
+// apart from a return the rest of the table has been watching as "offline" and
+// needs to be told about.
+func (s *SQLiteStorage) MarkPlayerConnected(roomID int64, playerName string) (bool, error) {
+	res, err := s.db.Exec(
+		"UPDATE room_players SET disconnected_at = NULL WHERE room_id = ? AND player_name = ? AND disconnected_at IS NOT NULL",
+		roomID, playerName,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ListStalePlayers finds players who dropped before the cutoff and never came
+// back, in rooms that are still active. These are the seats worth reclaiming.
+func (s *SQLiteStorage) ListStalePlayers(cutoff time.Time) ([]models.StalePlayer, error) {
+	rows, err := s.db.Query(`
+		SELECT rp.room_id, r.room_key, r.game, rp.player_name, rp.disconnected_at
+		FROM room_players rp
+		JOIN rooms r ON r.id = rp.room_id
+		WHERE rp.left_at IS NULL
+		  AND rp.disconnected_at IS NOT NULL
+		  AND rp.disconnected_at < ?
+		  AND r.status = 'active'
+		ORDER BY rp.disconnected_at
+	`, sqliteTime(cutoff))
+	if err != nil {
+		return nil, fmt.Errorf("list stale players: %w", err)
+	}
+	defer rows.Close()
+
+	var stale []models.StalePlayer
+	for rows.Next() {
+		var sp models.StalePlayer
+		var since scanTime
+		if err := rows.Scan(&sp.RoomID, &sp.RoomKey, &sp.Game, &sp.PlayerName, &since); err != nil {
+			continue
+		}
+		sp.DisconnectedAt = since.Time
+		stale = append(stale, sp)
+	}
+	return stale, rows.Err()
 }
 
 func (s *SQLiteStorage) RemoveAllPlayers(roomID int64) error {
@@ -237,7 +473,7 @@ func (s *SQLiteStorage) DeleteRoom(roomKey string) error {
 
 func (s *SQLiteStorage) GetRoomPlayers(roomID int64) ([]models.RoomPlayer, error) {
 	rows, err := s.db.Query(
-		"SELECT id, room_id, player_name, color, ready, joined_at, left_at FROM room_players WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at",
+		"SELECT id, room_id, player_name, color, ready, joined_at, left_at, disconnected_at FROM room_players WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at",
 		roomID,
 	)
 	if err != nil {
@@ -248,7 +484,7 @@ func (s *SQLiteStorage) GetRoomPlayers(roomID int64) ([]models.RoomPlayer, error
 	var players []models.RoomPlayer
 	for rows.Next() {
 		var p models.RoomPlayer
-		if err := rows.Scan(&p.ID, &p.RoomID, &p.PlayerName, &p.Color, &p.Ready, &p.JoinedAt, &p.LeftAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.RoomID, &p.PlayerName, &p.Color, &p.Ready, &p.JoinedAt, &p.LeftAt, &p.DisconnectedAt); err != nil {
 			continue
 		}
 		players = append(players, p)

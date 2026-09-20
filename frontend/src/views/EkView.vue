@@ -16,11 +16,11 @@
           v-model="createName"
           placeholder="Room name"
           maxlength="30"
-          class="room-name-input"
+          class="room-name-input" data-testid="ek-create-name-input"
           @keydown.enter="submitCreate"
           autofocus
         >
-        <button class="btn" :disabled="!createName.trim()" @click="submitCreate">Create Room</button>
+        <button class="btn" data-testid="ek-create-submit" :disabled="!createName.trim()" @click="submitCreate">Create Room</button>
         <button class="back-link" @click="showNameInput = false; createName = ''"><ArrowLeft :size="14" /> Back</button>
       </div>
     </div>
@@ -38,7 +38,6 @@
       :loading-rooms="loadingRooms"
       @submit-key="submitJoinKey"
       @pick-room="pickRoom"
-      @delete-room="onDeleteFromList"
       @back="phase = 'choose'"
     />
 
@@ -70,21 +69,26 @@
       @delete="onDelete"
     />
 
-    <EkResultOverlay
-      v-if="phase === 'lobby' && store.phase === 'game' && store.gameState?.phase === 'ended'"
-      :is-host="isHost"
-      @delete="onDelete"
-    />
+    <!-- Wrapped here rather than inside the component so the overlay gets a
+         leave as well as an enter — the v-if that removes it lives out here. -->
+    <Transition name="modal" appear>
+      <EkResultOverlay
+        v-if="phase === 'lobby' && store.phase === 'game' && store.gameState?.phase === 'ended'"
+        :is-host="isHost"
+        @delete="onDelete"
+      />
+    </Transition>
   </div>
 </template>
 
 <script setup>
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { toast } from 'vue-sonner'
 import { Bomb, ArrowLeft } from '@lucide/vue'
 import { useEkStore } from '../stores/explodingKitchen'
-import { listRooms, deleteRoom } from '../api'
+import { listRooms } from '../api'
 import JoinOverlay from '../components/JoinOverlay.vue'
+import { loadSavedPlayer, saveSavedPlayer, forgetSavedPlayer } from '../savedPlayer'
 import EkChoosePhase from '../components/game/EkChoosePhase.vue'
 import EkCreatePhase from '../components/game/EkCreatePhase.vue'
 import EkJoinPhase from '../components/game/EkJoinPhase.vue'
@@ -121,14 +125,25 @@ async function fetchRooms() {
   }
 }
 
+// The kitchen palette lives on <html> rather than on this view's root so it
+// also reaches nodes teleported to <body> — RoomSettings' modal and the
+// draw-flight animation — which render outside this subtree. Hub and Hotpot
+// keep the original dark theme.
+onMounted(() => {
+  document.documentElement.classList.add('theme-kitchen')
+})
+
+onUnmounted(() => {
+  document.documentElement.classList.remove('theme-kitchen')
+})
+
 onMounted(async () => {
   const params = new URLSearchParams(window.location.search)
   const room = params.get('room')
   if (room) {
-    const saved = localStorage.getItem(`ek-player-${room}`)
-    if (saved) {
+    const player = loadSavedPlayer(`ek-player-${room}`)
+    if (player) {
       try {
-        const player = JSON.parse(saved)
         const result = await store.joinLobby(player, room)
         if (result?.error) {
           savedName.value = player.name || ''
@@ -185,7 +200,7 @@ function submitJoinKey() {
 }
 
 async function onCreateJoin(player) {
-  localStorage.setItem(`ek-player-${createdKey.value}`, JSON.stringify(player))
+  saveSavedPlayer(`ek-player-${createdKey.value}`, player)
   const result = await store.joinLobby(player, createdKey.value)
   if (result?.error) {
     toast.error(result.error.charAt(0).toUpperCase() + result.error.slice(1))
@@ -195,7 +210,7 @@ async function onCreateJoin(player) {
 }
 
 async function onJoin(player) {
-  localStorage.setItem(`ek-player-${joinKey.value}`, JSON.stringify(player))
+  saveSavedPlayer(`ek-player-${joinKey.value}`, player)
   window.history.replaceState(null, '', `${window.location.pathname}?room=${joinKey.value}`)
   savedName.value = ''
   savedColor.value = ''
@@ -210,7 +225,7 @@ async function onJoin(player) {
 async function onDelete() {
   if (!confirm('Delete this room? Everyone will be kicked out.')) return
   if (store.roomKey) {
-    localStorage.removeItem(`ek-player-${store.roomKey}`)
+    forgetSavedPlayer(`ek-player-${store.roomKey}`)
   }
   await store.deleteRoom()
   phase.value = 'choose'
@@ -220,17 +235,11 @@ async function onDelete() {
 async function onLeave() {
   if (!confirm('Leave this room?')) return
   if (store.roomKey) {
-    localStorage.removeItem(`ek-player-${store.roomKey}`)
+    forgetSavedPlayer(`ek-player-${store.roomKey}`)
   }
   await store.leaveRoom()
   phase.value = 'choose'
   window.history.replaceState(null, '', window.location.pathname)
-}
-
-async function onDeleteFromList(roomKey) {
-  if (!confirm('Delete this room?')) return
-  await deleteRoom('ek', roomKey)
-  await fetchRooms()
 }
 </script>
 
@@ -238,8 +247,8 @@ async function onDeleteFromList(roomKey) {
 .choose-overlay {
   position: fixed;
   inset: 0;
-  z-index: 100;
-  background: rgba(21, 15, 12, 0.94);
+  z-index: var(--z-overlay);
+  background: var(--paper);
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -247,32 +256,55 @@ async function onDeleteFromList(roomKey) {
   padding: 20px;
 }
 
+/* Same striped paper the other entry phases use, so naming a room does not
+   drop the flow onto a flat scrim for one screen. */
+.choose-overlay::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 90, 43, 0.22), rgba(255, 232, 194, 0) 58%),
+    repeating-linear-gradient(-38deg, #ffdfae 0 26px, var(--paper) 26px 52px);
+  pointer-events: none;
+}
+
 .create-card {
   position: relative;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 36px 32px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 32px 28px;
   max-width: 400px;
   width: 100%;
   text-align: center;
 }
 
 .choose-icon {
-  font-size: 2rem;
-  display: block;
-  margin-bottom: 12px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 64px;
+  height: 64px;
+  margin-bottom: 14px;
+  background: var(--chili);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: 22px;
+  box-shadow: var(--lift);
+  color: var(--ink);
+  transform: rotate(-6deg);
 }
 
 .create-card h1 {
-  font-size: 1.7rem;
+  font-size: 1.9rem;
   margin-bottom: 8px;
+  color: var(--ink);
 }
 
 .create-card p {
-  color: var(--mild-cream);
-  opacity: 0.8;
-  font-size: 0.92rem;
+  color: var(--muted-cream);
+  font-size: 0.95rem;
+  font-weight: 700;
   line-height: 1.5;
   margin-bottom: 22px;
 }
@@ -280,65 +312,43 @@ async function onDeleteFromList(roomKey) {
 .room-name-input {
   width: 100%;
   padding: 14px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: #1c1512;
-  color: var(--steam-cream);
+  border-radius: var(--radius-sm);
+  border: var(--edge-w) solid var(--edge);
+  background: var(--sand);
+  color: var(--ink);
   font-size: 1.1rem;
   text-align: center;
-  font-weight: 600;
+  font-weight: 800;
   outline: none;
-  margin-bottom: 14px;
+  margin-bottom: 16px;
   font-family: inherit;
 }
 
-.room-name-input:focus {
-  border-color: var(--chili-orange);
+.room-name-input::placeholder {
+  color: var(--muted-cream);
 }
 
+.room-name-input:focus-visible {
+  outline: 3px solid var(--chili);
+  outline-offset: 3px;
+}
+
+/* The shared .btn and .back-link rules in main.css already carry the kitchen
+   treatment; only the layout bits that were local stay here. */
 .btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 13px 28px;
-  border-radius: 100px;
-  font-weight: 600;
-  font-size: 0.95rem;
-  border: none;
-  cursor: pointer;
   width: 100%;
-  background: linear-gradient(135deg, var(--chili-orange), var(--broth-red));
-  color: var(--steam-cream);
-  transition: transform 0.15s ease;
-  font-family: inherit;
-}
-
-.btn:hover {
-  transform: translateY(-2px);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-  transform: none;
 }
 
 .back-link {
   display: inline-flex;
   align-items: center;
-  gap: 4px;
-  margin-top: 14px;
+  justify-content: center;
+  gap: 6px;
+  margin-top: 12px;
   background: none;
   border: none;
-  color: var(--mild-cream);
-  opacity: 0.6;
-  font-size: 0.85rem;
+  font-size: 0.9rem;
   cursor: pointer;
   font-family: inherit;
-}
-
-.back-link:hover {
-  opacity: 1;
 }
 </style>

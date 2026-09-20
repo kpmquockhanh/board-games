@@ -1,12 +1,12 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
 
 	"ping/handlers"
-	"ping/models"
 	"ping/storage"
 	ws "ping/ws"
 
@@ -27,19 +27,6 @@ func main() {
 	defer store.Close()
 
 	hub := ws.NewHub()
-	hub.OnDisconnect(func(room, player string) {
-		if err := store.RemovePlayerByRoomKey(room, player); err != nil {
-			log.Printf("[ws] failed to remove player %s from room %s: %v", player, room, err)
-			return
-		}
-
-		hub.BroadcastToRoom(room, models.WSMessage{
-			Type:   "player_left",
-			Room:   room,
-			Player: player,
-		})
-		log.Printf("[ws] player disconnected: room=%s player=%s", room, player)
-	})
 	go hub.Run()
 
 	router := gin.New()
@@ -55,6 +42,16 @@ func main() {
 	}))
 
 	h := handlers.NewHandler(store, hub)
+	hub.OnDisconnect(h.HandleDisconnect)
+
+	// Retires rooms everyone walked away from, and eventually deletes them.
+	// Nothing else frees a room: a mid-game disconnect keeps its player's
+	// seat, so without this a table that dropped out stays full forever.
+	// Tunable through REAP_* — see handlers.ReaperConfigFromEnv.
+	reaperCfg := handlers.ReaperConfigFromEnv()
+	reaperCtx, stopReaper := context.WithCancel(context.Background())
+	defer stopReaper()
+	go h.RunReaper(reaperCtx, reaperCfg)
 
 	api := router.Group("/api")
 	{
@@ -78,5 +75,12 @@ func main() {
 	fmt.Printf("   Create: POST http://localhost%s/api/{game}/create\n", addr)
 	fmt.Printf("   Join: POST http://localhost%s/api/{game}/join\n", addr)
 	fmt.Printf("   Database: %s\n", dbPath)
+	if reaperCfg.Enabled {
+		fmt.Printf("   Reaper: every %s — forfeit dropped players after %s, abandon idle rooms after %s, delete after %s, keep %d events\n",
+			reaperCfg.Interval, reaperCfg.DropPlayerAfter, reaperCfg.AbandonAfter,
+			reaperCfg.DeleteAfter, reaperCfg.TimelineKeep)
+	} else {
+		fmt.Printf("   Reaper: disabled\n")
+	}
 	log.Fatal(router.Run(addr))
 }

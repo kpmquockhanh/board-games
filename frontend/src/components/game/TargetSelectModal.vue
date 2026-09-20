@@ -1,23 +1,26 @@
 <template>
-  <div v-if="store.targetSelectModal.show" class="modal" ref="modalRef">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="target-modal-title">
-      <h2 id="target-modal-title">Choose a target</h2>
-      <p>Select a player to steal from:</p>
-      <div class="player-list">
-        <button
-          v-for="player in store.targetSelectModal.players"
-          :key="player"
-          class="player-btn"
-          @click="store.targetSelectModal.resolve(player)"
-        >
-          {{ player }}
-        </button>
-      </div>
-      <div class="modal-actions">
-        <button class="btn btn-secondary" @click="store.targetSelectModal.resolve(null)">Cancel</button>
+  <Transition name="modal">
+    <div v-if="store.targetSelectModal.show" class="modal" data-testid="target-modal" ref="modalRef">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="target-modal-title">
+        <h2 id="target-modal-title">Choose a target</h2>
+        <p>Select a player to steal from:</p>
+        <div class="player-list">
+          <button
+            v-for="player in store.targetSelectModal.players"
+            :key="player"
+            class="player-btn"
+            :data-testid="'target-player-' + player"
+            @click="store.targetSelectModal.resolve(player)"
+          >
+            {{ player }}
+          </button>
+        </div>
+        <div class="modal-actions">
+          <button class="btn btn-secondary" data-testid="target-cancel" @click="store.targetSelectModal.resolve(null)">Cancel</button>
+        </div>
       </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <script setup>
@@ -41,7 +44,9 @@ watch(() => store.targetSelectModal.show, async (show) => {
   position: fixed;
   inset: 0;
   z-index: var(--z-modal);
-  background: rgba(21, 15, 12, 0.88);
+  /* Ink at 58% rather than a near-opaque black — on a light ground the game
+     behind the dialog should stay legible, not be blacked out. */
+  background: rgba(27, 14, 6, 0.58);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -49,24 +54,26 @@ watch(() => store.targetSelectModal.show, async (show) => {
 }
 
 .modal-card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 32px 28px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 30px 26px;
   max-width: 420px;
   width: 100%;
   text-align: center;
 }
 
 .modal-card h2 {
-  font-size: 1.3rem;
-  margin-bottom: 12px;
+  font-size: 1.45rem;
+  color: var(--ink);
+  margin-bottom: 10px;
 }
 
 .modal-card p {
-  color: var(--mild-cream);
-  opacity: 0.8;
-  font-size: 0.9rem;
+  color: var(--muted-cream);
+  font-size: 0.92rem;
+  font-weight: 700;
   line-height: 1.5;
   margin-bottom: 18px;
 }
@@ -74,29 +81,32 @@ watch(() => store.targetSelectModal.show, async (show) => {
 .player-list {
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 10px;
   margin-bottom: 16px;
 }
 
 .player-btn {
   padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--steam-cream);
+  min-height: 52px;
+  border-radius: var(--radius-md);
+  border: var(--edge-w) solid var(--edge);
+  box-shadow: 0 3px 0 var(--edge);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 800;
   font-size: 1rem;
   cursor: pointer;
-  transition: all var(--ease-standard);
+  transition: var(--transition-interactive);
 }
 
 .player-btn:hover {
-  border-color: var(--chili-orange);
-  background: rgba(226, 99, 44, 0.12);
-  color: var(--chili-orange);
+  background: var(--chili);
 }
 
 .player-btn:active {
-  transform: scale(0.98);
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--edge);
 }
 
 .modal-actions {

@@ -216,6 +216,7 @@ import { X, Soup, ArrowLeft, ClipboardCopy } from '@lucide/vue'
 import { useHotpotStore } from '../stores/hotpot'
 import { listRooms, deleteRoom } from '../api'
 import JoinOverlay from '../components/JoinOverlay.vue'
+import { loadSavedPlayer, saveSavedPlayer, forgetSavedPlayer } from '../savedPlayer'
 
 const store = useHotpotStore()
 const chatText = ref('')
@@ -290,10 +291,9 @@ onMounted(async () => {
   const params = new URLSearchParams(window.location.search)
   const room = params.get('room')
   if (room) {
-    const saved = localStorage.getItem(`hotpot-player-${room}`)
-    if (saved) {
+    const player = loadSavedPlayer(`hotpot-player-${room}`)
+    if (player) {
       try {
-        const player = JSON.parse(saved)
         const result = await store.join(player, room)
         if (result?.error) {
           savedName.value = player.name || ''
@@ -355,7 +355,7 @@ function copyRoomKey() {
 }
 
 async function onCreateJoin(player) {
-  localStorage.setItem(`hotpot-player-${createdKey.value}`, JSON.stringify(player))
+  saveSavedPlayer(`hotpot-player-${createdKey.value}`, player)
   const result = await store.join(player, createdKey.value)
   if (result?.error) {
     toast.error(result.error.charAt(0).toUpperCase() + result.error.slice(1))
@@ -365,7 +365,7 @@ async function onCreateJoin(player) {
 }
 
 async function onJoin(player) {
-  localStorage.setItem(`hotpot-player-${joinKey.value}`, JSON.stringify(player))
+  saveSavedPlayer(`hotpot-player-${joinKey.value}`, player)
   window.history.replaceState(null, '', `${window.location.pathname}?room=${joinKey.value}`)
   savedName.value = ''
   savedColor.value = ''
@@ -379,7 +379,7 @@ async function onJoin(player) {
 
 function onLeave() {
   if (store.roomKey) {
-    localStorage.removeItem(`hotpot-player-${store.roomKey}`)
+    forgetSavedPlayer(`hotpot-player-${store.roomKey}`)
   }
   store.leave()
   window.location.href = '/hotpot'
@@ -388,7 +388,7 @@ function onLeave() {
 async function onDelete() {
   if (!confirm('Delete this room? Everyone will be kicked out.')) return
   if (store.roomKey) {
-    localStorage.removeItem(`hotpot-player-${store.roomKey}`)
+    forgetSavedPlayer(`hotpot-player-${store.roomKey}`)
   }
   await store.deleteRoom()
   phase.value = 'choose'

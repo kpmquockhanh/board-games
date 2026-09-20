@@ -56,10 +56,11 @@ const showPreview = ref(false)
 .card-view {
   width: 80px;
   height: 112px;
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   cursor: pointer;
-  border: 2px solid var(--line);
-  background: var(--charcoal);
+  border: 2.5px solid var(--edge);
+  background: var(--surface);
+  box-shadow: 0 3px 0 var(--edge);
   position: relative;
   flex-shrink: 0;
   display: flex;
@@ -67,35 +68,37 @@ const showPreview = ref(false)
   align-items: center;
   justify-content: center;
   gap: 4px;
-  transition: transform var(--ease-standard), border-color var(--ease-standard), box-shadow var(--ease-standard);
+  transition: transform var(--duration-fast) var(--ease-out), box-shadow var(--duration-fast) var(--ease-out), filter var(--duration-fast) ease;
   user-select: none;
   overflow: visible;
 }
 
-.card-view:focus-visible {
-  outline: 2px solid var(--chili-orange);
-  outline-offset: 2px;
-}
-
 .card-view:not(.card-back):hover {
   transform: translateY(-6px);
-  border-color: var(--chili-orange);
+  box-shadow: 0 9px 0 var(--edge);
   z-index: var(--z-cards);
 }
 
 .card-view:not(.card-back):active {
   transform: translateY(-2px);
+  box-shadow: 0 5px 0 var(--edge);
 }
 
+/* Selection is a gold ring drawn inside the outline, so the card keeps its
+   exact footprint and nothing around it reflows when one is picked. */
 .card-view.selected {
-  border-color: var(--gold);
-  box-shadow: 0 0 20px rgba(238, 194, 92, 0.45), 0 0 40px rgba(238, 194, 92, 0.15);
   transform: translateY(-6px);
+  box-shadow: 0 9px 0 var(--edge), inset 0 0 0 4px var(--gold);
   z-index: var(--z-cards);
 }
 
+/* Washed out rather than faded: on a light ground low opacity reads as
+   half-erased instead of unavailable. */
 .card-view.disabled {
-  opacity: 0.35;
+  filter: grayscale(0.85) contrast(0.92) brightness(1.04);
+  background: var(--dim-fill);
+  border-color: var(--dim-edge);
+  box-shadow: 0 3px 0 var(--dim-edge);
   cursor: default;
   pointer-events: none;
 }
@@ -113,10 +116,11 @@ const showPreview = ref(false)
 }
 
 .card-name {
-  font-size: 0.55rem;
-  letter-spacing: 0.06em;
-  color: var(--mild-cream);
-  opacity: 0.8;
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.58rem;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+  color: var(--ink);
   text-align: center;
   padding: 0 4px;
   white-space: nowrap;
@@ -128,7 +132,7 @@ const showPreview = ref(false)
 .card-pattern {
   width: 100%;
   height: 100%;
-  background: repeating-conic-gradient(#2a1d16 0% 25%, var(--charcoal) 0% 50%) 50%/16px 16px;
+  background: repeating-conic-gradient(var(--chili) 0% 25%, var(--chili-deep) 0% 50%) 50%/16px 16px;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -143,9 +147,9 @@ const showPreview = ref(false)
   transform-origin: bottom center;
   pointer-events: none;
   z-index: var(--z-cards);
-  border-radius: 10px;
+  border-radius: var(--radius-sm);
   overflow: hidden;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.5), 0 0 0 2px var(--chili-orange);
+  box-shadow: 0 8px 24px rgba(27, 14, 6, 0.32), 0 0 0 2.5px var(--edge);
 }
 
 .card-preview img {
@@ -153,7 +157,7 @@ const showPreview = ref(false)
   height: 112px;
   object-fit: contain;
   display: block;
-  background: var(--charcoal);
+  background: var(--surface);
 }
 
 .preview-enter-active {
@@ -185,7 +189,7 @@ const showPreview = ref(false)
 }
 
 .card-view.size-small .card-name {
-  font-size: 0.45rem;
+  font-size: 0.48rem;
 }
 
 .card-view.size-mini {
@@ -198,6 +202,6 @@ const showPreview = ref(false)
 }
 
 .card-view.size-mini .card-name {
-  font-size: 0.4rem;
+  font-size: 0.42rem;
 }
 </style>

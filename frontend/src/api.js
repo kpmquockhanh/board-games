@@ -1,3 +1,4 @@
+import { getSessionId } from './session'
 const API_URL = import.meta.env.VITE_API_URL ?? ''
 
 export async function createRoom(gameCode, name) {
@@ -29,7 +30,7 @@ export async function joinRoom(gameCode, roomKey, playerName, color) {
     const res = await fetch(`${API_URL}/api/${encodeURIComponent(gameCode)}/join`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ room_key: roomKey, player_name: playerName, color }),
+      body: JSON.stringify({ room_key: roomKey, player_name: playerName, color, session: getSessionId() }),
     })
     const data = await res.json()
     if (!res.ok) return { error: data.error || 'join failed' }
@@ -61,10 +62,11 @@ export async function getRoomTimeline(gameCode, roomKey, limit = 100) {
   }
 }
 
-export async function getRoomState(gameCode, roomKey) {
+export async function getRoomState(gameCode, roomKey, playerName = '') {
   try {
+    const player = playerName ? `?player=${encodeURIComponent(playerName)}` : ''
     const res = await fetch(
-      `${API_URL}/api/${encodeURIComponent(gameCode)}/rooms/${encodeURIComponent(roomKey)}/state`
+      `${API_URL}/api/${encodeURIComponent(gameCode)}/rooms/${encodeURIComponent(roomKey)}/state${player}`
     )
     if (!res.ok) return null
     return await res.json()
@@ -83,11 +85,11 @@ export async function saveRoomState(gameCode, roomKey, action, data, player = ''
         body: JSON.stringify({ action, data, player }),
       }
     )
-    if (!res.ok) return false
-    const result = await res.json()
-    return result.state || true
+    const result = await res.json().catch(() => ({}))
+    if (!res.ok) return { error: result.error || 'that action was rejected' }
+    return { state: result.state ?? null }
   } catch {
-    return false
+    return { error: 'network error' }
   }
 }
 

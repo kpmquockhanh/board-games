@@ -1,13 +1,8 @@
 <template>
-  <div class="result-overlay">
+  <div class="result-overlay" data-testid="result-overlay">
     <div class="result-card" role="dialog" aria-modal="true" aria-labelledby="result-title">
-      <h1 id="result-title">{{ store.winner === store.me?.name ? 'You win!' : 'Game Over' }}</h1>
-      <p>
-        {{ store.winner === store.me?.name
-          ? 'Congratulations! You are the last chef standing.'
-          : (store.winner ? store.winner + ' won the game.' : 'No one survived.')
-        }}
-      </p>
+      <h1 id="result-title" data-testid="result-title">{{ store.didIWin ? 'You win!' : 'Game Over' }}</h1>
+      <p>{{ outcome }}</p>
       <div v-if="store.recentLog.length > 0" class="result-log">
         <h3>Game log</h3>
         <div class="result-log-entries">
@@ -17,6 +12,7 @@
         </div>
       </div>
       <div class="result-actions">
+        <button class="btn" data-testid="result-rematch" @click="store.requestRematch()">Play again</button>
         <router-link to="/" class="btn btn-secondary">Back to hub</router-link>
         <button v-if="isHost" class="btn-link" @click="$emit('delete')">Delete room</button>
       </div>
@@ -25,6 +21,7 @@
 </template>
 
 <script setup>
+import { computed } from 'vue'
 import { useEkStore } from '../../stores/explodingKitchen'
 
 const props = defineProps({
@@ -34,6 +31,22 @@ const props = defineProps({
 defineEmits(['delete'])
 
 const store = useEkStore()
+
+const outcome = computed(() => {
+  const winners = store.winners
+  if (winners.length > 1) {
+    const others = winners.filter((n) => n !== store.me?.name)
+    return store.didIWin
+      ? `The deck ran out — you and ${others.join(', ')} share the win.`
+      : `The deck ran out — ${winners.join(', ')} share the win.`
+  }
+  if (winners.length === 1) {
+    return store.didIWin
+      ? 'Congratulations! You are the last chef standing.'
+      : `${winners[0]} won the game.`
+  }
+  return 'No one survived.'
+})
 </script>
 
 <style scoped>
@@ -41,7 +54,7 @@ const store = useEkStore()
   position: fixed;
   inset: 0;
   z-index: var(--z-result);
-  background: rgba(21, 15, 12, 0.92);
+  background: rgba(27, 14, 6, 0.58);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -49,33 +62,38 @@ const store = useEkStore()
 }
 
 .result-card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 40px 36px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 36px 30px;
   max-width: 400px;
   width: 100%;
   text-align: center;
 }
 
 .result-card h1 {
-  font-size: 2rem;
+  font-size: 2.2rem;
+  line-height: 1.05;
+  color: var(--ink);
   margin-bottom: 10px;
 }
 
 .result-card > p {
-  color: var(--mild-cream);
-  opacity: 0.8;
+  color: var(--muted-cream);
   font-size: 0.95rem;
+  font-weight: 700;
   line-height: 1.5;
   margin-bottom: 24px;
 }
 
+/* The buttons are the global kitchen .btn / .btn-secondary / .btn-link — this
+   only stacks them, so the three stay in step with every other screen. */
 .result-actions {
   display: flex;
   flex-direction: column;
   gap: 10px;
-  align-items: center;
+  align-items: stretch;
 }
 
 .result-log {
@@ -84,27 +102,33 @@ const store = useEkStore()
 }
 
 .result-log h3 {
-  font-size: 0.72rem;
+  display: inline-block;
+  padding: 4px 12px;
+  border-radius: 100px;
+  border: 2px solid var(--edge);
+  background: var(--gold);
+  color: var(--ink);
+  font-size: 0.68rem;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--gold);
-  margin-bottom: 8px;
-  text-align: center;
+  margin-bottom: 10px;
 }
 
 .result-log-entries {
   max-height: 140px;
   overflow-y: auto;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 10px;
+  background: var(--sand);
+  border: 2.5px solid var(--edge);
+  border-radius: var(--radius-md);
   padding: 10px 14px;
 }
 
 .result-log-entries .log-entry {
   font-size: 0.78rem;
-  padding: 3px 0;
+  font-weight: 700;
+  padding: 4px 0;
   color: var(--mild-cream);
-  border-bottom: 1px solid var(--line);
+  border-bottom: 2px solid rgba(27, 14, 6, 0.12);
   line-height: 1.4;
 }
 
@@ -113,22 +137,7 @@ const store = useEkStore()
 }
 
 .result-log-entries .log-entry b {
-  color: var(--steam-cream);
-}
-
-.btn-link {
-  background: transparent;
-  border: none;
-  color: var(--broth-red);
-  padding: 8px 16px;
-  font-size: 0.85rem;
-  text-decoration: underline;
-  cursor: pointer;
-  font-family: inherit;
-  transition: opacity var(--ease-standard);
-}
-
-.btn-link:hover {
-  opacity: 0.7;
+  color: var(--ink);
+  font-weight: 800;
 }
 </style>

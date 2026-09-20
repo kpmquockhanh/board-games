@@ -35,8 +35,6 @@ export function defaultRoomSettings() {
       dig_deeper: true,
       favor: true,
       clone: true,
-      group_effects: false,
-      special_power: false,
       cat_cards: true,
     },
   }
@@ -57,10 +55,22 @@ function getCardData(cardId) {
   return null
 }
 
+// Resolves what the player typed to a card id. The server matches by card type,
+// so any card of the named kind will do — which is just as well, since most
+// kinds exist under several ids with different names on them.
 function getCardIdByName(name) {
+  const needle = String(name || '').trim().toLowerCase()
+  if (!needle) return null
+
   for (const cat of Object.values(cardsData.categories)) {
-    const found = cat.cards.find((c) => c.name === name)
+    const found = cat.cards.find((c) => c.name.toLowerCase() === needle)
     if (found) return found.id
+  }
+
+  // What the card does, rather than the joke printed on it: "Attack", "Nope".
+  for (const [key, cat] of Object.entries(cardsData.categories)) {
+    const label = (categoryNameMap[key] || key).toLowerCase()
+    if (label === needle && cat.cards.length > 0) return cat.cards[0].id
   }
   return null
 }
@@ -82,8 +92,6 @@ const categoryNameMap = {
   dig_deeper: 'Dig Deeper',
   favor: 'Favor',
   clone: 'Clone',
-  group_effects: 'Group Effects',
-  special_power: 'Special Power',
   cat_cards: 'Cat Cards',
   explosive: 'Explosive',
   defense: 'Defense',
@@ -92,6 +100,22 @@ const categoryNameMap = {
 function getCategoryName(cardId) {
   const cat = getCardCategory(cardId)
   return categoryNameMap[cat] || cat
+}
+
+// A window nobody is answering. Kept in one place because the store clears it
+// from half a dozen spots (leaving, being kicked, a new game).
+function emptyNopeWindow() {
+  return {
+    active: false,
+    playerId: null,
+    cardId: null,
+    cardName: null,
+    cat: null,
+    expiresAt: null,
+    nopeCount: 0,
+    lastNopePlayer: null,
+    passed: [],
+  }
 }
 
 export const useEkStore = defineStore('explodingKitchen', {
@@ -106,28 +130,30 @@ export const useEkStore = defineStore('explodingKitchen', {
       gameState: null,
     },
     selectedCardIndices: [],
-    turnTimer: null,
     turnTimeLeft: 0,
     modal: { show: false, title: '', desc: '', cards: [], resolve: null },
-    defusePositionModal: { show: false, deckLength: 0, resolve: null },
+    positionModal: { show: false, title: '', desc: '', deckLength: 0, resolve: null },
+    chooseCardModal: { show: false, title: '', desc: '', cards: [], resolve: null },
     garbageCollectionModal: { show: false, resolve: null },
     favorModal: { show: false, step: 'target', targetName: null, resolve: null },
     targetSelectModal: { show: false, players: [], resolve: null },
     cardNameInputModal: { show: false, title: '', desc: '', resolve: null },
     discardPickerModal: { show: false, resolve: null },
     localTopCards: null,
-    nopeWindow: {
-      active: false,
-      playerId: null,
-      cardId: null,
-      cardName: null,
-      cat: null,
-      expiresAt: null,
-      nopeCount: 0,
-      lastNopePlayer: null,
-    },
+    nopeWindow: emptyNopeWindow(),
     nopeTimeLeft: 0,
+    offlinePlayers: [],
+    // Stable identities for the cards in my hand. Card ids repeat, so the
+    // position in the hand is the only thing that tells two Skips apart —
+    // which is exactly what breaks when a card is drawn or played. These
+    // uids survive the reshuffle so Vue can animate a card rather than
+    // patching a new image into an existing node.
+    handSlots: [],
+    // The card currently flying from the deck into my hand, if any.
+    drawFlight: null,
+    _uidSeq: 0,
     _nopeTimer: null,
+    _turnTimer: null,
     _gameEndShown: false,
     _ws: null,
   }),
@@ -137,7 +163,7 @@ export const useEkStore = defineStore('explodingKitchen', {
     gameState: (state) => state.roomState.gameState,
     isMyTurn: (state) => state.gameState?.turn === state.me?.name,
     myHand: (state) => state.gameState?.players[state.me?.name]?.hand || [],
-    drawPileCount: (state) => state.gameState?.deck?.length || 0,
+    drawPileCount: (state) => state.gameState?.deckCount || 0,
     discardTop: (state) => {
       const d = state.gameState?.discard
       if (!d || d.length === 0) return null
@@ -146,7 +172,14 @@ export const useEkStore = defineStore('explodingKitchen', {
     recentlyPlayed: (state) => {
       const d = state.gameState?.discard
       if (!d || d.length === 0) return []
-      return d.slice(-5).reverse().map(id => getCardData(id)).filter(Boolean)
+      // The position in the discard pile is carried along as a key: keying by
+      // the loop index makes Vue patch a new image into the node that is
+      // already on top, so a card landing on the pile can never animate.
+      return d
+        .slice(-5)
+        .map((id, i) => ({ card: getCardData(id), key: d.length - 5 + i }))
+        .filter(e => e.card)
+        .reverse()
     },
     selectedCards: (state) => {
       const hand = state.gameState?.players[state.me?.name]?.hand || []
@@ -213,6 +246,27 @@ export const useEkStore = defineStore('explodingKitchen', {
     playerList: (state) => Object.keys(state.lobby.players),
     turnOrder: (state) => state.gameState?.turnOrder || [],
     winner: (state) => state.gameState?.winner,
+    // More than one means the deck ran out and the survivors shared the win.
+    winners: (state) => state.gameState?.winners || (state.gameState?.winner ? [state.gameState.winner] : []),
+    didIWin: (state) => {
+      const list = state.gameState?.winners || (state.gameState?.winner ? [state.gameState.winner] : [])
+      return !!state.me && list.includes(state.me.name)
+    },
+    amIEliminated: (state) => {
+      if (!state.me || !state.gameState) return false
+      return state.gameState.players?.[state.me.name]?.alive === false
+    },
+    isOffline: (state) => (name) => state.offlinePlayers.includes(name),
+    // The hand as the fan renders it: each card with the stable uid of the
+    // slot it lives in. Falls back to the index if the slots have not been
+    // synced yet, which only happens on the very first paint.
+    handCards: (state) => {
+      const hand = state.gameState?.players[state.me?.name]?.hand || []
+      return hand.map((cardId, i) => ({
+        cardId,
+        uid: state.handSlots[i]?.uid ?? `i${i}`,
+      }))
+    },
     recentLog: (state) => (state.gameState?.log || []).slice(-15).reverse(),
     amISpectating: (state) => {
       if (!state.me || !state.gameState) return false
@@ -228,17 +282,46 @@ export const useEkStore = defineStore('explodingKitchen', {
       if (players.length < state.roomSettings.minPlayers) return false
       return players.every((p) => p.ready)
     },
-    canINope: (state) => {
+    // Whether the open window is still mine to answer — with a Nope or with a
+    // pass. Deliberately says nothing about my cards: everyone who may answer
+    // gets the same prompt, so a window that closes early never reveals who
+    // was holding a Nope.
+    canIAnswerNope: (state) => {
       if (!state.nopeWindow.active || !state.me || !state.gameState) return false
+      const me = state.gameState.players[state.me.name]
+      if (!me || me.alive === false) return false
       if (state.nopeWindow.lastNopePlayer === state.me.name) return false
-      const myHand = state.gameState.players[state.me.name]?.hand || []
+      // You may counter a Nope played on your card, but not Nope yourself.
+      if (state.nopeWindow.playerId === state.me.name && state.nopeWindow.nopeCount === 0) return false
+      return !state.nopeWindow.passed.includes(state.me.name)
+    },
+    canINope() {
+      if (!this.canIAnswerNope) return false
+      const myHand = this.gameState.players[this.me.name]?.hand || []
       return myHand.some(c => getCardCategory(c) === 'nope')
+    },
+    // How many players the window is still waiting on, for the countdown
+    // banner. A head count, never a hand count.
+    nopeWaitingCount: (state) => {
+      if (!state.nopeWindow.active || !state.gameState) return 0
+      const players = state.gameState.players || {}
+      return Object.entries(players).filter(([name, p]) => {
+        if (!p || p.alive === false) return false
+        if (name === state.nopeWindow.lastNopePlayer) return false
+        if (name === state.nopeWindow.playerId && state.nopeWindow.nopeCount === 0) return false
+        return !state.nopeWindow.passed.includes(name)
+      }).length
     },
   },
 
   actions: {
     getCardData,
     getCategoryName,
+
+    categoryLabel(cat) {
+      if (cat === 'combo_5x') return 'Rainbow'
+      return categoryNameMap[cat] || cat
+    },
 
     async create(roomName) {
       const res = await createRoom(GAME_CODE, roomName)
@@ -264,7 +347,9 @@ export const useEkStore = defineStore('explodingKitchen', {
         gameState: null,
       }
       this.selectedCardIndices = []
-      this.nopeWindow = { active: false, playerId: null, cardId: null, cardName: null, cat: null, expiresAt: null, nopeCount: 0, lastNopePlayer: null }
+      this.handSlots = []
+      this.drawFlight = null
+      this.nopeWindow = emptyNopeWindow()
       this._stopNopeTimer()
       toast('Room deleted')
     },
@@ -286,7 +371,9 @@ export const useEkStore = defineStore('explodingKitchen', {
         gameState: null,
       }
       this.selectedCardIndices = []
-      this.nopeWindow = { active: false, playerId: null, cardId: null, cardName: null, cat: null, expiresAt: null, nopeCount: 0, lastNopePlayer: null }
+      this.handSlots = []
+      this.drawFlight = null
+      this.nopeWindow = emptyNopeWindow()
       this._stopNopeTimer()
       toast('Left the kitchen')
     },
@@ -303,7 +390,7 @@ export const useEkStore = defineStore('explodingKitchen', {
 
 
       const [stateRes, playersData] = await Promise.all([
-        getRoomState(GAME_CODE, this.roomKey),
+        getRoomState(GAME_CODE, this.roomKey, player.name),
         getPlayers(GAME_CODE, this.roomKey),
       ])
 
@@ -319,15 +406,32 @@ export const useEkStore = defineStore('explodingKitchen', {
           gameState: null,
         }
       }
-      console.log('playersData:', { playersData, stateRes })
+      this.handSlots = []
+      this.drawFlight = null
+      this._syncHandSlots()
+
+      // A page that reloads mid-game must land back at the table, not in the
+      // lobby. The restored snapshot already says whether a game is running,
+      // so the phase comes from it rather than from waiting for the socket to
+      // push one: a lobby screen that needs a Ready click to get past is not a
+      // reconnect.
+      if (this.roomState.gameState?.phase) {
+        this.phase = 'game'
+      }
 
       this.lobby = { players: {}, started: false }
+      this.offlinePlayers = []
       if (playersData?.players) {
         for (const p of playersData.players) {
           this.lobby.players[p.player_name] = {
             color: p.color,
             joined: p.joined_at,
             ready: p.ready || false,
+          }
+          // A page that has just loaded was never told about the drops that
+          // happened before it, so it takes them from the roster.
+          if (p.disconnected_at && p.player_name !== player.name) {
+            this.offlinePlayers.push(p.player_name)
           }
         }
       }
@@ -349,31 +453,6 @@ export const useEkStore = defineStore('explodingKitchen', {
     async toggleReady() {
       if (!this.me) return
       await this._sendAction('toggleReady', {})
-    },
-
-    async startGame() {
-      const names = Object.keys(this.lobby.players)
-      if (names.length < this.roomSettings.minPlayers) return
-
-      this._gameEndShown = false
-
-      const data = {
-        players: {},
-        turnOrder: names,
-        handSize: this.roomSettings.handSize,
-        defenseCount: this.roomSettings.startingDefense,
-        multiplier: this.roomSettings.deckSizeMultiplier || 1,
-        enabledCats: this.roomSettings.enabledCategories || {},
-      }
-      names.forEach((n) => {
-        data.players[n] = { color: this.lobby.players[n].color }
-      })
-
-      this.lobby.started = true
-      this.phase = 'game'
-
-      await this._sendAction('startGame', data)
-      toast.success('Game started!')
     },
 
     async drawCard() {
@@ -482,8 +561,8 @@ export const useEkStore = defineStore('explodingKitchen', {
         desc = 'Type the exact card name. If it\'s not in the discard pile, the combo is wasted.'
       } else {
         const catName = categoryNameMap[category] || category
-        title = `Name a ${catName} card to steal`
-        desc = 'Type the exact card name. If the target doesn\'t have it, the combo is wasted.'
+        title = `Name a card to steal with your ${catName} combo`
+        desc = 'Name the kind of card you want — "Attack", "Nope", "Tacocat". If the target has none, the combo is wasted.'
       }
       return new Promise((resolve) => {
         this.cardNameInputModal = {
@@ -521,14 +600,17 @@ export const useEkStore = defineStore('explodingKitchen', {
     },
 
     async playNope() {
-      if (!this.nopeWindow.active || !this.me || !this.gameState) return
-      if (this.nopeWindow.lastNopePlayer === this.me.name) return
-      const myHand = this.gameState?.players?.[this.me?.name]?.hand
-      if (!myHand) return
-      const hasNope = myHand.some(c => getCardCategory(c) === 'nope')
-      if (!hasNope) return
-
+      if (!this.canINope) return
       await this._sendAction('playNope', {})
+    },
+
+    // Letting the play through. Passing is what closes the window early, so
+    // everyone is offered it — holding a Nope has nothing to do with it.
+    async passNope() {
+      if (!this.canIAnswerNope) return
+      // Optimistic, so the button stops asking before the server answers.
+      this.nopeWindow.passed = [...this.nopeWindow.passed, this.me.name]
+      await this._sendAction('passNope', {})
     },
 
     detectCombo(indices) {
@@ -593,6 +675,70 @@ export const useEkStore = defineStore('explodingKitchen', {
       this.localTopCards = null
     },
 
+    // Bury and Dig Deeper each stop for a decision only this player can make.
+    _openChoice(choice) {
+      const kind = choice.Kind || choice.kind
+      if (kind === 'bury') {
+        if (this.positionModal.show) return
+        this.positionModal = {
+          show: true,
+          title: 'Bury a card',
+          desc: 'You took the top card without looking at it. Choose where it goes back:',
+          deckLength: choice.DeckSize ?? choice.deckSize ?? 0,
+          resolve: async (position) => {
+            this.positionModal.show = false
+            await this._sendAction('resolveChoice', { position })
+          },
+        }
+        return
+      }
+
+      if (this.chooseCardModal.show) return
+      this.chooseCardModal = {
+        show: true,
+        title: 'Dig Deeper',
+        desc: 'Keep one of these cards. The rest go back on top of the deck, in the same order.',
+        cards: choice.Cards || choice.cards || [],
+        resolve: async (index) => {
+          this.chooseCardModal.show = false
+          await this._sendAction('resolveChoice', { index })
+        },
+      }
+    },
+
+    // Back to the lobby with the same people and the same settings.
+    async requestRematch() {
+      // The reset itself comes back over the socket, so every client at the
+      // table goes to the lobby together.
+      await this._sendAction('rematch', {})
+    },
+
+    _handleRematch() {
+      this._gameEndShown = false
+      this._stopNopeTimer()
+      this._stopTurnCountdown()
+      this.roomState.gameState = null
+      this.phase = 'lobby'
+      this.selectedCardIndices = []
+      this.handSlots = []
+      this.drawFlight = null
+      this.offlinePlayers = []
+      this.localTopCards = null
+      this.modal.show = false
+      this.positionModal.show = false
+      this.chooseCardModal.show = false
+      this.favorModal.show = false
+      this.garbageCollectionModal.show = false
+      this.targetSelectModal.show = false
+      this.cardNameInputModal.show = false
+      this.discardPickerModal.show = false
+      this.nopeWindow = emptyNopeWindow()
+      for (const p of Object.values(this.lobby.players)) p.ready = false
+      this.lobby.started = false
+      this._refreshPlayers()
+      toast('Rematch! Ready up when you are.')
+    },
+
     async resolveDefuse(useDefuse, position) {
       await this._sendAction('resolveDefuse', { useDefuse, position })
     },
@@ -610,6 +756,25 @@ export const useEkStore = defineStore('explodingKitchen', {
       this._nopeTimer = setInterval(update, 250)
     },
 
+    _startTurnCountdown(endsAt) {
+      this._stopTurnCountdown()
+      const update = () => {
+        const left = Math.max(0, Math.ceil((endsAt - Date.now()) / 1000))
+        this.turnTimeLeft = left
+        if (left <= 0) this._stopTurnCountdown()
+      }
+      update()
+      this._turnTimer = setInterval(update, 250)
+    },
+
+    _stopTurnCountdown() {
+      if (this._turnTimer) {
+        clearInterval(this._turnTimer)
+        this._turnTimer = null
+      }
+      this.turnTimeLeft = 0
+    },
+
     _stopNopeTimer() {
       if (this._nopeTimer) {
         clearInterval(this._nopeTimer)
@@ -619,19 +784,45 @@ export const useEkStore = defineStore('explodingKitchen', {
     },
 
     _connectWs() {
-      if (this._ws) {
-        this._ws.disconnect()
-      }
+      this._disconnectWs()
       const ws = useWsStore()
       this._ws = ws
       ws.connect(this.roomKey, this.me.name)
-      ws.onMessage((msg) => this._handleWsMessage(msg))
+      // Keep the unsubscribers: leaving and rejoining a room otherwise stacks
+      // another copy of every handler on the shared socket store.
+      this._wsOff = [
+        ws.onMessage((msg) => this._handleWsMessage(msg)),
+        ws.onOpen((reopened) => { if (reopened) this._rejoinAfterReconnect() }),
+      ]
     },
 
     _disconnectWs() {
+      if (this._wsOff) {
+        this._wsOff.forEach((off) => off())
+        this._wsOff = null
+      }
       if (this._ws) {
         this._ws.disconnect()
         this._ws = null
+      }
+    },
+
+    // A dropped socket takes the player out of the room on the server, so every
+    // action afterwards is refused until they are put back in it.
+    async _rejoinAfterReconnect() {
+      if (!this.me || !this.roomKey) return
+
+      const result = await joinRoom(GAME_CODE, this.roomKey, this.me.name, this.me.color)
+      if (result?.error && !/already connected/i.test(result.error)) {
+        toast.error(`Couldn't rejoin: ${result.error}`)
+        return
+      }
+
+      // The server pushes the game state on connect; this is for the room
+      // settings, which it does not.
+      const stateRes = await getRoomState(GAME_CODE, this.roomKey, this.me.name)
+      if (stateRes?.state?.roomSettings) {
+        this.roomState.roomSettings = { ...defaultRoomSettings(), ...stateRes.state.roomSettings }
       }
     },
 
@@ -647,6 +838,10 @@ export const useEkStore = defineStore('explodingKitchen', {
         this._handlePlayerJoined(msg)
       } else if (msg.type === 'player_left') {
         this._handlePlayerLeft(msg)
+      } else if (msg.type === 'player_disconnected') {
+        this._handlePlayerDisconnected(msg)
+      } else if (msg.type === 'player_reconnected') {
+        this._handlePlayerReconnected(msg)
       } else if (msg.type === 'player_ready') {
         this._handlePlayerReady(msg)
       } else if (msg.type === 'room_settings_updated') {
@@ -655,6 +850,8 @@ export const useEkStore = defineStore('explodingKitchen', {
         this._handleRoomDeleted()
       } else if (msg.type === 'game_ended') {
         this._handleGameEnd()
+      } else if (msg.type === 'rematch') {
+        this._handleRematch()
       }
     },
 
@@ -669,7 +866,15 @@ export const useEkStore = defineStore('explodingKitchen', {
       if (!state) return
 
       if (state.players) {
+        // Selections are hand positions, so anything that reshuffles the hand
+        // (a draw, a steal, a Favor) would leave them pointing at other cards.
+        const before = this.myHand.join(',')
+        const prevDeckCount = this.drawPileCount
         this.roomState.gameState = state
+        this._syncHandSlots(prevDeckCount)
+        if (this.myHand.join(',') !== before) {
+          this.selectedCardIndices = []
+        }
         if (state.phase === 'playing') {
           this.phase = 'game'
         }
@@ -677,6 +882,13 @@ export const useEkStore = defineStore('explodingKitchen', {
 
       const gs = this.roomState.gameState
       if (!gs) return
+
+      const turnEndsAt = gs.turnEndsAt ? new Date(gs.turnEndsAt).getTime() : null
+      if (turnEndsAt) {
+        this._startTurnCountdown(turnEndsAt)
+      } else {
+        this._stopTurnCountdown()
+      }
 
       if (gs.NopeWindow || gs.nopeWindow) {
         const nw = gs.NopeWindow || gs.nopeWindow
@@ -692,12 +904,21 @@ export const useEkStore = defineStore('explodingKitchen', {
             expiresAt: expiresAtMs,
             nopeCount: nw.NopeCount || nw.nopeCount || 0,
             lastNopePlayer: nw.LastNopePlayer || nw.lastNopePlayer || null,
+            passed: nw.Passed || nw.passed || [],
           }
           this._startNopeTimer(expiresAtMs)
         }
       } else if (this.nopeWindow.active) {
-        this.nopeWindow = { active: false, playerId: null, cardId: null, cardName: null, cat: null, expiresAt: null, nopeCount: 0, lastNopePlayer: null }
+        this.nopeWindow = emptyNopeWindow()
         this._stopNopeTimer()
+      }
+
+      const pendingChoice = gs.PendingChoice || gs.pendingChoice
+      if (pendingChoice && pendingChoice.PlayerID === this.me?.name) {
+        this._openChoice(pendingChoice)
+      } else if (!pendingChoice) {
+        this.positionModal.show = this.positionModal.show && !!(gs.PendingDefuse || gs.pendingDefuse)
+        this.chooseCardModal.show = false
       }
 
       if (gs.PendingGarbage || gs.pendingGarbage) {
@@ -714,6 +935,10 @@ export const useEkStore = defineStore('explodingKitchen', {
             },
           }
         }
+      } else if (this.garbageCollectionModal.show) {
+        // Same as the Favor picker below: once the round is resolved the
+        // prompt is stale, and answering it sends an action the server drops.
+        this.garbageCollectionModal.show = false
       }
 
       const nopeActive = !!(gs.NopeWindow || gs.nopeWindow)
@@ -723,7 +948,7 @@ export const useEkStore = defineStore('explodingKitchen', {
         const myName = this.me?.name
         if (pf.PlayerID === myName && !pf.TargetID && !nopeActive) {
           const alivePlayers = this.turnOrder.filter(
-            p => p !== myName && this.gameState?.players?.[p]?.alive && (this.gameState?.players?.[p]?.hand?.length || 0) > 0
+            p => p !== myName && this.gameState?.players?.[p]?.alive && (this.gameState?.players?.[p]?.handCount || 0) > 0
           )
           if (alivePlayers.length > 0 && !this.favorModal.show) {
             this.favorModal = {
@@ -754,6 +979,11 @@ export const useEkStore = defineStore('explodingKitchen', {
             }
           }
         }
+      } else if (this.favorModal.show) {
+        // The Favor is settled — the target chose, or the prompt timed out and
+        // a card was given for them. Leaving the picker up asks for a card that
+        // has already been handed over, and the click does nothing.
+        this.favorModal.show = false
       }
 
       if (gs.Log && gs.Log.length > 0) {
@@ -788,12 +1018,13 @@ export const useEkStore = defineStore('explodingKitchen', {
         resolve: async (useDefuse) => {
           this.modal.show = false
           if (useDefuse) {
-            const deckLength = this.gameState?.deck?.length || 0
-            this.defusePositionModal = {
+            this.positionModal = {
               show: true,
-              deckLength,
+              title: 'Place the Explosive',
+              desc: 'Choose where to put the Explosive card back in the deck:',
+              deckLength: this.gameState?.deckCount || 0,
               resolve: async (position) => {
-                this.defusePositionModal.show = false
+                this.positionModal.show = false
                 await this.resolveDefuse(true, position)
               },
             }
@@ -817,16 +1048,44 @@ export const useEkStore = defineStore('explodingKitchen', {
     },
 
     _handleGameEnd() {
+      if (this._gameEndShown) return
+      this._gameEndShown = true
+      this._stopTurnCountdown()
 
-      if (!this._gameEndShown) {
-        this._gameEndShown = true
-        const w = this.gameState?.winner
-        if (w) {
-          toast(w === this.me?.name ? '🎉 You win!' : `💀 ${w} won the game!`)
-        } else {
-          toast('💀 Game ended — no winner')
+      const winners = this.winners
+      if (this.didIWin) {
+        toast(winners.length > 1 ? '🏁 You survived the deck — shared win!' : '🎉 You win!')
+      } else if (winners.length === 1) {
+        toast(`💀 ${winners[0]} won the game!`)
+      } else if (winners.length > 1) {
+        toast(`🏁 The deck ran out — ${winners.join(', ')} survive`)
+      } else {
+        toast('💀 Game ended — no winner')
+      }
+    },
+
+    // Rebuilds the roster from the server. Every client then lists players in
+    // the same order, so they agree on who the host is — it used to depend on
+    // the order each client happened to hear about people joining.
+    async _refreshPlayers() {
+      if (!this.roomKey) return
+      const data = await getPlayers(GAME_CODE, this.roomKey)
+      if (!data?.players) return
+      const roster = {}
+      for (const p of data.players) {
+        roster[p.player_name] = {
+          color: p.color,
+          joined: p.joined_at,
+          ready: p.ready || false,
         }
       }
+      this.lobby.players = roster
+      // The server is the authority on who is away. A tab that has just
+      // reloaded starts with an empty list and was never told about the drops
+      // that happened while it was gone, so take them from the roster.
+      this.offlinePlayers = data.players
+        .filter((p) => p.disconnected_at && p.player_name !== this.me?.name)
+        .map((p) => p.player_name)
     },
 
     _handlePlayerJoined(msg) {
@@ -834,39 +1093,46 @@ export const useEkStore = defineStore('explodingKitchen', {
       try {
         payload = typeof msg.payload === 'string' ? JSON.parse(msg.payload) : msg.payload
       } catch {
-        return
+        payload = null
       }
-      if (!payload) return
+      const player = payload?.player || msg.player
 
-      const { player, color, players, colors } = payload
-      if (players && Array.isArray(players)) {
-        for (const name of players) {
-          if (!this.lobby.players[name]) {
-            this.lobby.players[name] = {
-              color: colors?.[name] || '#888',
-              joined: Date.now(),
-              ready: false,
-            }
-          }
-        }
-      } else if (player) {
-        if (!this.lobby.players[player]) {
-          this.lobby.players[player] = {
-            color: color || '#888',
-            joined: Date.now(),
-            ready: false,
-          }
-        }
+      if (player) {
+        this.offlinePlayers = this.offlinePlayers.filter((name) => name !== player)
       }
+      this._refreshPlayers()
+
       if (player && player !== this.me?.name) {
         toast(`${player} joined the kitchen!`)
       }
     },
 
     _handlePlayerLeft(msg) {
-      if (msg.player && this.lobby?.players?.[msg.player]) {
-        delete this.lobby.players[msg.player]
+      this._refreshPlayers()
+      if (msg.player && msg.player !== this.me?.name) {
         toast(`${msg.player} left the kitchen`)
+      }
+    },
+
+    // Dropped mid-game: they keep their seat and their cards, so say so rather
+    // than announcing that they left.
+    _handlePlayerDisconnected(msg) {
+      if (!msg.player || msg.player === this.me?.name) return
+      if (!this.offlinePlayers.includes(msg.player)) {
+        this.offlinePlayers.push(msg.player)
+      }
+      toast(`${msg.player} lost connection`)
+    },
+
+    // They are back — from a reload, or from whatever took their connection
+    // away. Nothing else clears the offline mark, so without this the rest of
+    // the table keeps them greyed out for the rest of the game.
+    _handlePlayerReconnected(msg) {
+      if (!msg.player) return
+      const wasOffline = this.offlinePlayers.includes(msg.player)
+      this.offlinePlayers = this.offlinePlayers.filter((name) => name !== msg.player)
+      if (wasOffline && msg.player !== this.me?.name) {
+        toast(`${msg.player} is back`)
       }
     },
 
@@ -909,21 +1175,86 @@ export const useEkStore = defineStore('explodingKitchen', {
         gameState: null,
       }
       this.selectedCardIndices = []
-      this.nopeWindow = { active: false, playerId: null, cardId: null, cardName: null, cat: null, expiresAt: null, nopeCount: 0, lastNopePlayer: null }
+      this.handSlots = []
+      this.drawFlight = null
+      this.nopeWindow = emptyNopeWindow()
       this._stopNopeTimer()
       toast('Room has been deleted')
     },
 
+    // Re-pairs the hand with its stable slot uids after the server sends new
+    // state, and notices when a card arrived from the deck so the table can
+    // fly it into the fan.
+    _syncHandSlots(prevDeckCount) {
+      const hand = this.gameState?.players[this.me?.name]?.hand || []
+      const prev = this.handSlots
+      const taken = new Array(prev.length).fill(false)
+      const next = new Array(hand.length).fill(null)
+
+      // A card still sitting where it was keeps its slot. Drawing appends, so
+      // this pass alone resolves the common case.
+      for (let i = 0; i < hand.length && i < prev.length; i++) {
+        if (prev[i].cardId === hand[i]) {
+          next[i] = prev[i]
+          taken[i] = true
+        }
+      }
+      // Anything left takes the first free slot holding the same card id, so a
+      // card that only shifted position is still the same card to Vue.
+      for (let i = 0; i < hand.length; i++) {
+        if (next[i]) continue
+        const j = prev.findIndex((p, k) => !taken[k] && p.cardId === hand[i])
+        if (j !== -1) {
+          next[i] = prev[j]
+          taken[j] = true
+        }
+      }
+      const fresh = []
+      for (let i = 0; i < hand.length; i++) {
+        if (!next[i]) {
+          next[i] = { uid: `c${++this._uidSeq}`, cardId: hand[i] }
+          fresh.push(next[i])
+        }
+      }
+      this.handSlots = next
+
+      // One new card while the deck shrank is a draw — the only case where the
+      // card can be shown travelling from the pile. A Favor or a steal also
+      // adds a card, but it comes from a hand, not the deck.
+      const drewFromDeck =
+        fresh.length === 1 &&
+        typeof prevDeckCount === 'number' &&
+        this.drawPileCount < prevDeckCount
+      if (drewFromDeck) {
+        // Never cleared here: the action's own reply and the broadcast both
+        // land, and the second one must not cancel a flight already running.
+        this.drawFlight = { uid: fresh[0].uid, cardId: fresh[0].cardId }
+      }
+    },
+
+    clearDrawFlight() {
+      this.drawFlight = null
+    },
+
     async _sendAction(action, data = {}) {
       const result = await saveRoomState(GAME_CODE, this.roomKey, action, data, this.me.name)
+      if (result?.error) {
+        // The server refuses an action without changing anything, so the only
+        // sign the player gets is this.
+        toast.error(result.error)
+        return { error: result.error }
+      }
       if (result?.state) {
         const saved = result.state
         if (saved.players) {
+          const prevDeckCount = this.drawPileCount
           this.roomState.gameState = saved
+          this._syncHandSlots(prevDeckCount)
         } else if (saved.minPlayers !== undefined) {
           this.roomState.roomSettings = { ...defaultRoomSettings(), ...saved }
         }
       }
+      return result
     },
   },
 })

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math/rand"
+	"strings"
 	"sync"
 	"time"
 )
@@ -11,7 +12,12 @@ import (
 const (
 	NOPE_WINDOW_SECONDS = 8
 	MAX_LOG_ENTRIES     = 50
-	TURN_TIMER_INTERVAL = 1 * time.Second
+
+	// How long the table waits for a player to answer a prompt — a defuse, a
+	// Favor, a Garbage Collection pick — before deciding for them. Nothing else
+	// can happen while one is pending, so without this one closed tab is enough
+	// to stall the game permanently.
+	PENDING_TIMEOUT_SECONDS = 30
 )
 
 type LogEntry struct {
@@ -34,16 +40,27 @@ type EKGameState struct {
 	TurnOrder        []string                `json:"turnOrder"`
 	Phase            string                  `json:"phase"`
 	Winner           *string                 `json:"winner"`
+	Winners          []string                `json:"winners,omitempty"`
 	Log              []LogEntry              `json:"log"`
 	AttackStack      int                     `json:"attackStack"`
 	ReverseDirection bool                    `json:"reverseDirection"`
+
+	// When the current turn is forced to draw, for clients to count down to.
+	TurnEndsAt *time.Time `json:"turnEndsAt,omitempty"`
+
+	// The category of the last card whose effect actually happened. Clone used
+	// to copy whatever sat on top of the discard pile, which is just as often
+	// a spent Nope or a dead player's dumped hand.
+	LastPlayed string `json:"lastPlayed,omitempty"`
 
 	NopeWindow     *NopeWindowState        `json:"NopeWindow,omitempty"`
 	PendingDefuse  *DefuseState            `json:"PendingDefuse,omitempty"`
 	PendingGarbage *GarbageCollectionState `json:"PendingGarbage,omitempty"`
 	PendingFavor   *PendingFavorState      `json:"PendingFavor,omitempty"`
+	PendingChoice  *PendingChoiceState     `json:"PendingChoice,omitempty"`
 	TurnTimer      *time.Timer             `json:"-"`
 	NopeTimer      *time.Timer             `json:"-"`
+	PendingTimer   *time.Timer             `json:"-"`
 	CancelFunc     chan struct{}           `json:"-"`
 }
 
@@ -55,6 +72,11 @@ type NopeWindowState struct {
 	NopeCount      int        `json:"NopeCount"`
 	LastNopePlayer string     `json:"LastNopePlayer"`
 	ExpiredAt      *time.Time `json:"ExpiredAt,omitempty"`
+
+	// Who has already answered this window with a pass. Everyone who may
+	// respond gets to pass, Nope in hand or not, so a window that closes
+	// early says nothing about anybody's cards.
+	Passed []string `json:"Passed,omitempty"`
 
 	ComboCategory  string   `json:"ComboCategory,omitempty"`
 	ComboCount     int      `json:"ComboCount,omitempty"`
@@ -81,11 +103,69 @@ type PendingFavorState struct {
 	TargetID string `json:"TargetID"`
 }
 
+// PendingChoiceState is a card waiting on a decision only one player can make:
+// which of the cards Dig Deeper turned up to keep, or where to put the card
+// Bury took off the top. Both used to decide at random on the player's behalf,
+// which is the entire point of those two cards.
+type PendingChoiceState struct {
+	PlayerID string   `json:"PlayerID"`
+	Kind     string   `json:"Kind"`
+	Cards    []string `json:"Cards,omitempty"`
+	DeckSize int      `json:"DeckSize"`
+}
+
 type ActionResult struct {
 	State      *EKGameState
 	Messages   []WSMessage
 	Prompt     *WSMessage
 	NopeWindow bool
+	Error      string
+}
+
+// reject refuses an action without touching the state. The message is shown to
+// the player who tried it, so it is phrased for them and not for a log.
+func reject(gs *EKGameState, msg string) *ActionResult {
+	return &ActionResult{State: gs, Error: msg}
+}
+
+// pendingReason names the resolution the table is waiting on, if any. Nothing
+// else may happen until it clears, or effects resolve twice.
+func (gs *EKGameState) pendingReason() string {
+	switch {
+	case gs.NopeWindow != nil:
+		return "wait for the Nope window to close"
+	case gs.PendingDefuse != nil:
+		return "someone is defusing an Explosive card"
+	case gs.PendingGarbage != nil:
+		return "waiting for everyone to pick a card for the deck"
+	case gs.PendingFavor != nil:
+		return "waiting for a Favor to be given"
+	case gs.PendingChoice != nil:
+		return "waiting for a card to be placed"
+	}
+	return ""
+}
+
+// validateCards reports why cards cannot be played from this hand, or "" when
+// every one of them is a real, non-explosive card the player actually holds.
+func validateCards(player *PlayerState, cards []string) string {
+	held := map[string]int{}
+	for _, c := range player.Hand {
+		held[c]++
+	}
+	for _, c := range cards {
+		if GetCardData(c) == nil {
+			return "that card doesn't exist"
+		}
+		if GetCardCategory(c) == "explosive" {
+			return "you can't play an Explosive card"
+		}
+		if held[c] == 0 {
+			return "that card isn't in your hand"
+		}
+		held[c]--
+	}
+	return ""
 }
 
 type WSMessage struct {
@@ -117,6 +197,8 @@ func ProcessAction(gs *EKGameState, action GameAction) *ActionResult {
 		return handlePlayCard(gs, action)
 	case "playNope":
 		return handlePlayNope(gs, action)
+	case "passNope":
+		return handlePassNope(gs, action)
 	case "nopeResolved":
 		return handleNopeResolved(gs, action)
 	case "playCombo":
@@ -129,6 +211,8 @@ func ProcessAction(gs *EKGameState, action GameAction) *ActionResult {
 		return handleResolveGarbageCollection(gs, action)
 	case "resolveFavor":
 		return handleResolveFavor(gs, action)
+	case "resolveChoice":
+		return handleResolveChoice(gs, action)
 	default:
 		return &ActionResult{State: gs}
 	}
@@ -136,15 +220,21 @@ func ProcessAction(gs *EKGameState, action GameAction) *ActionResult {
 
 func handleStartGame(gs *EKGameState, action GameAction) *ActionResult {
 	var data struct {
-		Players      map[string]*PlayerState `json:"players"`
-		TurnOrder    []string                `json:"turnOrder"`
-		HandSize     int                     `json:"handSize"`
-		DefenseCount int                     `json:"defenseCount"`
-		Multiplier   float64                 `json:"multiplier"`
-		EnabledCats  map[string]bool         `json:"enabledCats"`
+		Players        map[string]*PlayerState `json:"players"`
+		TurnOrder      []string                `json:"turnOrder"`
+		HandSize       int                     `json:"handSize"`
+		DefenseCount   int                     `json:"defenseCount"`
+		Multiplier     float64                 `json:"multiplier"`
+		EnabledCats    map[string]bool         `json:"enabledCats"`
+		ExplosiveCount int                     `json:"explosiveCount"`
 	}
+	data.ExplosiveCount = -1 // -1 means "one fewer than the number of players"
 	if err := json.Unmarshal(action.Data, &data); err != nil {
 		return &ActionResult{State: gs}
+	}
+
+	if gs.Phase == "playing" {
+		return reject(gs, "a game is already in progress")
 	}
 
 	multiplier := data.Multiplier
@@ -152,7 +242,7 @@ func handleStartGame(gs *EKGameState, action GameAction) *ActionResult {
 		multiplier = 1.0
 	}
 
-	allCards := BuildDeck(len(data.TurnOrder), multiplier, data.EnabledCats)
+	allCards := BuildDeck(len(data.TurnOrder), multiplier, data.EnabledCats, data.ExplosiveCount)
 	explosives := []string{}
 	deck := []string{}
 	for _, c := range allCards {
@@ -233,12 +323,22 @@ func handleStartGame(gs *EKGameState, action GameAction) *ActionResult {
 }
 
 func handleDrawCard(gs *EKGameState, action GameAction) *ActionResult {
-	if gs.Phase != "playing" || gs.Turn != action.Player {
-		return &ActionResult{State: gs}
+	if gs.Phase != "playing" {
+		return reject(gs, "the game isn't running")
+	}
+	if gs.Turn != action.Player {
+		return reject(gs, "it's not your turn")
+	}
+	if busy := gs.pendingReason(); busy != "" {
+		return reject(gs, busy)
+	}
+	if p := gs.Players[action.Player]; p == nil || !p.Alive {
+		return reject(gs, "you're out of the game")
 	}
 
 	if len(gs.Deck) == 0 {
-		gs.endGame(nil)
+		// Nobody exploded — everyone who is still in it has survived the deck.
+		gs.endGame(gs.alivePlayers())
 		return &ActionResult{
 			State: gs,
 			Messages: []WSMessage{
@@ -279,7 +379,8 @@ func handleDrawCard(gs *EKGameState, action GameAction) *ActionResult {
 				ExplosiveID: card,
 			}
 			prompt := &WSMessage{
-				Type: "prompt_defuse",
+				Type:   "prompt_defuse",
+				Player: action.Player,
 				Payload: DefusePromptPayload{
 					Player: action.Player,
 					Card:   card,
@@ -328,33 +429,42 @@ func handleDrawCard(gs *EKGameState, action GameAction) *ActionResult {
 }
 
 func handlePlayCard(gs *EKGameState, action GameAction) *ActionResult {
-	if gs.Phase != "playing" || gs.Turn != action.Player {
-		return &ActionResult{State: gs}
+	if gs.Phase != "playing" {
+		return reject(gs, "the game isn't running")
+	}
+	if gs.Turn != action.Player {
+		return reject(gs, "it's not your turn")
+	}
+	if busy := gs.pendingReason(); busy != "" {
+		return reject(gs, busy)
 	}
 
 	var data struct {
 		Cards []string `json:"cards"`
 	}
 	if err := json.Unmarshal(action.Data, &data); err != nil || len(data.Cards) == 0 {
-		return &ActionResult{State: gs}
+		return reject(gs, "no card was played")
+	}
+	if len(data.Cards) > 1 {
+		return reject(gs, "those cards don't make a combo — play one card at a time")
 	}
 
 	player := gs.Players[action.Player]
-	if player == nil {
-		return &ActionResult{State: gs}
+	if player == nil || !player.Alive {
+		return reject(gs, "you're out of the game")
 	}
 
-	for _, cardID := range data.Cards {
-		if GetCardCategory(cardID) == "explosive" {
-			gs.addLog(action.Player, "can't play an Explosive card!")
-			return &ActionResult{State: gs}
-		}
+	if why := validateCards(player, data.Cards); why != "" {
+		return reject(gs, why)
 	}
 
 	cardID := data.Cards[0]
 	cat := GetCardCategory(cardID)
-	cardInfo := GetCardData(cardID)
-	cardName := cardInfo.Name
+	cardName := CardLabel(cardID)
+
+	if cat == "defense" {
+		return reject(gs, "a Defuse card is only used when you draw an Exploding Kitten")
+	}
 
 	for _, cardID := range data.Cards {
 		gs.Discard = append(gs.Discard, cardID)
@@ -372,173 +482,49 @@ func handlePlayCard(gs *EKGameState, action GameAction) *ActionResult {
 	}
 
 	if IsNopeable(cat) && cat != "favor" {
-		gs.addLog(action.Player, fmt.Sprintf("played %s. ⏳ Waiting for responses…", cardName))
-		gs.NopeWindow = &NopeWindowState{
+		return gs.openNopeWindow(&NopeWindowState{
 			PlayerID: action.Player,
 			CardID:   cardID,
 			CardName: cardName,
 			Category: cat,
-		}
-		return &ActionResult{
-			State:      gs,
-			Messages:   []WSMessage{{Type: "state_updated", Payload: gs}},
-			NopeWindow: true,
-		}
+		}, fmt.Sprintf("played %s", cardName))
 	}
+
+	// Everything nopeable resolves through the window above, so only the cards
+	// nobody can answer are left here.
+	gs.LastPlayed = cat
 
 	switch cat {
 	case "cat_cards":
+		// One cat card on its own does nothing — and does not end the turn.
+		// Two of a kind is a combo.
 		gs.addLog(action.Player, fmt.Sprintf("played %s. 🐱", cardName))
-	case "skip":
-		gs.handleSkip(action.Player)
-	case "super_skip":
-		gs.handleSuperSkip(action.Player)
-	case "reverse":
-		gs.handleReverse(action.Player)
-	case "attack":
-		gs.handleAttack(action.Player)
-	case "future_vision":
-		peekCount := min(3, len(gs.Deck))
-		if peekCount > 0 {
-			topCards := make([]string, peekCount)
-			for i := 0; i < peekCount; i++ {
-				topCards[i] = gs.Deck[len(gs.Deck)-1-i]
-			}
-			gs.addLog(action.Player, fmt.Sprintf("played %s. 🔮", cardName))
-			return &ActionResult{
-				State:      gs,
-				Messages:   []WSMessage{{Type: "state_updated", Payload: gs}},
-				NopeWindow: false,
-				Prompt: &WSMessage{
-					Type: "peek_cards",
-					Payload: map[string]interface{}{
-						"cards": topCards,
-					},
-				},
-			}
-		}
-		gs.addLog(action.Player, fmt.Sprintf("played %s. 🔮", cardName))
-	case "shuffle":
-		gs.Deck = Shuffle(gs.Deck)
-		gs.addLog(action.Player, fmt.Sprintf("shuffled the deck. 🔄"))
-	case "draw_from_bottom":
-		if len(gs.Deck) > 0 {
-			bottom := gs.Deck[0]
-			gs.Deck = gs.Deck[1:]
-			player.Hand = append(player.Hand, bottom)
-			gs.addLog(action.Player, "drew a card from the bottom of the deck! 📥")
-		}
-	case "swap_top_and_bottom":
-		if len(gs.Deck) >= 2 {
-			top := len(gs.Deck) - 1
-			gs.Deck[0], gs.Deck[top] = gs.Deck[top], gs.Deck[0]
-			gs.addLog(action.Player, "swapped the top and bottom cards of the deck. 🔃")
-		}
-	case "garbage_collection":
-		alive := []string{}
-		for _, name := range gs.TurnOrder {
-			if p := gs.Players[name]; p != nil && p.Alive && len(p.Hand) > 0 {
-				alive = append(alive, name)
-			}
-		}
-		if len(alive) == 0 {
-			gs.addLog(action.Player, "played Garbage Collection, but no one had cards to discard. 🗑️")
-			return &ActionResult{
-				State: gs,
-				Messages: []WSMessage{
-					{Type: "state_updated", Payload: gs},
-				},
-			}
-		}
-		gs.PendingGarbage = &GarbageCollectionState{
-			PlayerID:  action.Player,
-			Responded: make(map[string]string),
-		}
-		gs.addLog(action.Player, "played Garbage Collection! Everyone must choose a card to put into the deck. 🗑️")
-		return &ActionResult{
-			State: gs,
-			Messages: []WSMessage{
-				{Type: "state_updated", Payload: gs},
-			},
-		}
-	case "catomic_bomb":
-		removed := 0
-		removedCards := []string{}
-		newDeck := []string{}
-		for _, c := range gs.Deck {
-			if GetCardCategory(c) == "explosive" {
-				removed++
-				removedCards = append(removedCards, c)
-			} else {
-				newDeck = append(newDeck, c)
-			}
-		}
-		gs.Deck = append(newDeck, removedCards...)
-		gs.addLog(action.Player, fmt.Sprintf("removed %d explosive card(s) and placed them on top of the deck! 💣", removed))
-	case "mark":
-		if len(gs.Deck) >= 3 {
-			gs.addLog(action.Player, "marked the deck — peeked at the top 3 cards. 📍")
-		}
-	case "bury":
-		if len(player.Hand) > 0 && len(gs.Deck) > 0 {
-			buryIdx := rand.Intn(len(player.Hand))
-			buriedCard := player.Hand[buryIdx]
-			player.Hand = append(player.Hand[:buryIdx], player.Hand[buryIdx+1:]...)
-			pos := rand.Intn(len(gs.Deck) + 1)
-			gs.Deck = append(gs.Deck[:pos], append([]string{buriedCard}, gs.Deck[pos:]...)...)
-			gs.addLog(action.Player, "buried a card in the deck. ⚰️")
-		}
-	case "dig_deeper":
-		drawCount := min(3, len(gs.Deck))
-		if drawCount > 0 {
-			drawn := make([]string, drawCount)
-			for i := 0; i < drawCount; i++ {
-				drawn[i] = gs.Deck[len(gs.Deck)-1]
-				gs.Deck = gs.Deck[:len(gs.Deck)-1]
-			}
-			keepIdx := rand.Intn(len(drawn))
-			kept := drawn[keepIdx]
-			player.Hand = append(player.Hand, kept)
-			for i := len(drawn) - 1; i >= 0; i-- {
-				if i != keepIdx {
-					gs.Deck = append(gs.Deck, drawn[i])
-				}
-			}
-			gs.addLog(action.Player, fmt.Sprintf("dug deeper and kept 1 of %d cards! ⛏️", drawCount))
-		}
 	case "favor":
 		return gs.handleFavor(action.Player, cardName)
-	case "clone":
-		turnAdvanced := gs.handleClone(action.Player, cardName)
-		if turnAdvanced {
-			return &ActionResult{
-				State: gs,
-				Messages: []WSMessage{
-					{Type: "state_updated", Payload: gs},
-				},
-			}
-		}
 	default:
 		gs.addLog(action.Player, fmt.Sprintf("played %s.", cardName))
 	}
 
-	gs.advanceTurn()
 	return &ActionResult{
-		State: gs,
-		Messages: []WSMessage{
-			{Type: "state_updated", Payload: gs},
-		},
+		State:    gs,
+		Messages: []WSMessage{{Type: "state_updated", Payload: gs}},
 	}
 }
 
 func handlePlayCombo(gs *EKGameState, action GameAction) *ActionResult {
-	if gs.Phase != "playing" || gs.Turn != action.Player {
-		return &ActionResult{State: gs}
+	if gs.Phase != "playing" {
+		return reject(gs, "the game isn't running")
+	}
+	if gs.Turn != action.Player {
+		return reject(gs, "it's not your turn")
+	}
+	if busy := gs.pendingReason(); busy != "" {
+		return reject(gs, busy)
 	}
 
 	player := gs.Players[action.Player]
-	if player == nil {
-		return &ActionResult{State: gs}
+	if player == nil || !player.Alive {
+		return reject(gs, "you're out of the game")
 	}
 
 	var data struct {
@@ -548,12 +534,16 @@ func handlePlayCombo(gs *EKGameState, action GameAction) *ActionResult {
 		DiscardCardID string   `json:"discardCardId"`
 	}
 	if err := json.Unmarshal(action.Data, &data); err != nil || len(data.Cards) < 2 {
-		return &ActionResult{State: gs}
+		return reject(gs, "a combo needs at least two cards")
+	}
+
+	if why := validateCards(player, data.Cards); why != "" {
+		return reject(gs, why)
 	}
 
 	combo := detectCombo(data.Cards)
 	if combo == nil {
-		return &ActionResult{State: gs}
+		return reject(gs, "those cards don't make a combo")
 	}
 
 	for _, cardID := range combo.Cards {
@@ -566,8 +556,7 @@ func handlePlayCombo(gs *EKGameState, action GameAction) *ActionResult {
 		catName = combo.Category
 	}
 
-	gs.addLog(action.Player, fmt.Sprintf("played %dx %s combo. ⏳ Waiting for responses…", combo.Count, catName))
-	gs.NopeWindow = &NopeWindowState{
+	return gs.openNopeWindow(&NopeWindowState{
 		PlayerID:       action.Player,
 		CardName:       fmt.Sprintf("%dx %s", combo.Count, catName),
 		Category:       "combo",
@@ -577,12 +566,7 @@ func handlePlayCombo(gs *EKGameState, action GameAction) *ActionResult {
 		ComboTarget:    data.Target,
 		ComboCardID:    data.CardID,
 		ComboDiscardID: data.DiscardCardID,
-	}
-	return &ActionResult{
-		State:      gs,
-		Messages:   []WSMessage{{Type: "state_updated", Payload: gs}},
-		NopeWindow: true,
-	}
+	}, fmt.Sprintf("played a %dx %s combo", combo.Count, catName))
 }
 
 func handlePlayComboInternal(gs *EKGameState, action GameAction, combo *ComboResult, target string, cardID string, discardCardID string) *ActionResult {
@@ -617,11 +601,7 @@ func handlePlayComboInternal(gs *EKGameState, action GameAction, combo *ComboRes
 			pickedCard := gs.Discard[foundIdx]
 			gs.Discard = append(gs.Discard[:foundIdx], gs.Discard[foundIdx+1:]...)
 			player.Hand = append(player.Hand, pickedCard)
-			pickedData := GetCardData(pickedCard)
-			pickedName := discardCardID
-			if pickedData != nil {
-				pickedName = pickedData.Name
-			}
+			pickedName := CardLabel(pickedCard)
 			gs.addLog(action.Player, fmt.Sprintf("played 5x Rainbow combo and picked %s from the discard pile! 🌈🎁", pickedName))
 		} else {
 			gs.addLog(action.Player, fmt.Sprintf("played 5x Rainbow combo targeting %s, but it wasn't in the discard pile! 🌈", discardCardID))
@@ -660,7 +640,7 @@ func handlePlayComboInternal(gs *EKGameState, action GameAction, combo *ComboRes
 	if combo.Count >= 3 && cardID != "" {
 		stolenIdx := -1
 		for i, c := range targetHand {
-			if c == cardID {
+			if cardsMatch(cardID, c) {
 				stolenIdx = i
 				break
 			}
@@ -669,14 +649,10 @@ func handlePlayComboInternal(gs *EKGameState, action GameAction, combo *ComboRes
 			stolenCard := targetHand[stolenIdx]
 			gs.Players[target].Hand = append(targetHand[:stolenIdx], targetHand[stolenIdx+1:]...)
 			player.Hand = append(player.Hand, stolenCard)
-			stolenData := GetCardData(stolenCard)
-			stolenName := cardID
-			if stolenData != nil {
-				stolenName = stolenData.Name
-			}
+			stolenName := CardLabel(stolenCard)
 			gs.addLog(action.Player, fmt.Sprintf("played %dx %s combo and stole %s from %s! 🐱🎁", combo.Count, catName, stolenName, target))
 		} else {
-			gs.addLog(action.Player, fmt.Sprintf("played %dx %s combo targeting %s, but they didn't have it! 🐱", combo.Count, catName, target))
+			gs.addLog(action.Player, fmt.Sprintf("played %dx %s combo asking %s for a %s, but they didn't have one! 🐱", combo.Count, catName, target, CardLabel(cardID)))
 		}
 	} else {
 		if len(targetHand) > 0 {
@@ -699,18 +675,89 @@ func handlePlayComboInternal(gs *EKGameState, action GameAction, combo *ComboRes
 	}
 }
 
+// nopeResponders lists the living players who may still answer the open
+// window. It deliberately ignores what anyone is holding: the window is armed
+// for everyone who could respond, so its mere presence — and its length — never
+// betrays who has a Nope. The player who made the play counts only once they
+// have been Noped, since you may counter a Nope but not Nope yourself.
+func (gs *EKGameState) nopeResponders() []string {
+	if gs.NopeWindow == nil {
+		return nil
+	}
+	var out []string
+	for name, p := range gs.Players {
+		if p == nil || !p.Alive {
+			continue
+		}
+		if name == gs.NopeWindow.LastNopePlayer {
+			continue
+		}
+		if name == gs.NopeWindow.PlayerID && gs.NopeWindow.NopeCount == 0 {
+			continue
+		}
+		out = append(out, name)
+	}
+	return out
+}
+
+// everyoneHasPassed reports whether every player who could answer the window
+// has said they will not. That — not an empty-handed table — is what closes the
+// window ahead of its countdown.
+func (gs *EKGameState) everyoneHasPassed() bool {
+	responders := gs.nopeResponders()
+	if len(responders) == 0 {
+		return true
+	}
+	for _, name := range responders {
+		if !contains(gs.NopeWindow.Passed, name) {
+			return false
+		}
+	}
+	return true
+}
+
+func contains(list []string, want string) bool {
+	for _, v := range list {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+// openNopeWindow arms the window for a play. It runs for every nopeable play,
+// even when nobody at the table is holding a Nope: a play that resolved
+// instantly used to announce, to the whole table, that no Nope was out there.
+// The countdown is cut short only by the players themselves passing.
+func (gs *EKGameState) openNopeWindow(nw *NopeWindowState, played string) *ActionResult {
+	gs.NopeWindow = nw
+	if len(gs.nopeResponders()) == 0 {
+		gs.addLog(nw.PlayerID, played+".")
+		return resolveNopeWindow(gs, false)
+	}
+	gs.addLog(nw.PlayerID, played+". ⏳ Waiting for responses…")
+	return &ActionResult{
+		State:      gs,
+		Messages:   []WSMessage{{Type: "state_updated", Payload: gs}},
+		NopeWindow: true,
+	}
+}
+
 func handlePlayNope(gs *EKGameState, action GameAction) *ActionResult {
 	if gs.NopeWindow == nil {
-		return &ActionResult{State: gs}
+		return reject(gs, "there's nothing to Nope right now")
 	}
 
 	player := gs.Players[action.Player]
-	if player == nil {
-		return &ActionResult{State: gs}
+	if player == nil || !player.Alive {
+		return reject(gs, "you're out of the game")
 	}
 
 	if gs.NopeWindow.LastNopePlayer == action.Player {
-		return &ActionResult{State: gs}
+		return reject(gs, "you can't Nope twice in a row")
+	}
+	if action.Player == gs.NopeWindow.PlayerID && gs.NopeWindow.NopeCount == 0 {
+		return reject(gs, "you can't Nope your own card")
 	}
 
 	nopeIdx := -1
@@ -721,32 +768,66 @@ func handlePlayNope(gs *EKGameState, action GameAction) *ActionResult {
 		}
 	}
 	if nopeIdx < 0 {
-		return &ActionResult{State: gs}
+		return reject(gs, "you don't have a Nope card")
 	}
 
 	nopeCard := player.Hand[nopeIdx]
 	player.Hand = append(player.Hand[:nopeIdx], player.Hand[nopeIdx+1:]...)
 	gs.Discard = append(gs.Discard, nopeCard)
 
-	nopeInfo := GetCardData(nopeCard)
-	nopeName := "Nope"
-	if nopeInfo != nil {
-		nopeName = nopeInfo.Name
-	}
+	nopeName := CardLabel(nopeCard)
 
 	gs.NopeWindow.NopeCount++
 	gs.NopeWindow.LastNopePlayer = action.Player
 	gs.addLog(action.Player, fmt.Sprintf("played %s! 🚫", nopeName))
 
+	// A Nope reopens the window: whoever it was played against gets a fair
+	// chance to counter it, instead of racing the original countdown. Passes
+	// from the previous round are spent with it.
+	gs.NopeWindow.Passed = nil
+	if len(gs.nopeResponders()) == 0 {
+		return resolveNopeWindow(gs, true)
+	}
 	return &ActionResult{
-		State: gs,
-		Messages: []WSMessage{
-			{Type: "state_updated", Payload: gs},
-		},
+		State:      gs,
+		Messages:   []WSMessage{{Type: "state_updated", Payload: gs}},
+		NopeWindow: true,
+	}
+}
+
+// handlePassNope records that a player is letting the play through. Once
+// everyone who could answer has passed, the window closes without waiting out
+// the rest of the countdown.
+func handlePassNope(gs *EKGameState, action GameAction) *ActionResult {
+	if gs.NopeWindow == nil {
+		return reject(gs, "there's nothing to pass on right now")
+	}
+	if !contains(gs.nopeResponders(), action.Player) {
+		return reject(gs, "it's not your call on this one")
+	}
+	if contains(gs.NopeWindow.Passed, action.Player) {
+		return &ActionResult{State: gs, NopeWindow: false}
+	}
+
+	gs.NopeWindow.Passed = append(gs.NopeWindow.Passed, action.Player)
+
+	if gs.everyoneHasPassed() {
+		return resolveNopeWindow(gs, true)
+	}
+	return &ActionResult{
+		State:    gs,
+		Messages: []WSMessage{{Type: "state_updated", Payload: gs}},
 	}
 }
 
 func handleNopeResolved(gs *EKGameState, action GameAction) *ActionResult {
+	return resolveNopeWindow(gs, true)
+}
+
+// resolveNopeWindow applies (or cancels) the pending play. announce is false
+// when the window was never really open, so the log does not narrate a
+// countdown nobody saw.
+func resolveNopeWindow(gs *EKGameState, announce bool) *ActionResult {
 	if gs.NopeWindow == nil {
 		return &ActionResult{State: gs}
 	}
@@ -778,7 +859,14 @@ func handleNopeResolved(gs *EKGameState, action GameAction) *ActionResult {
 		}
 	}
 
-	gs.addLog("system", fmt.Sprintf("✅ %s's %s goes through!", playerID, cardName))
+	if announce {
+		gs.addLog("system", fmt.Sprintf("✅ %s's %s goes through!", playerID, cardName))
+	}
+
+	// What a later Clone will copy.
+	if cat != "clone" && cat != "combo" {
+		gs.LastPlayed = cat
+	}
 
 	player := gs.Players[playerID]
 	if player == nil {
@@ -800,30 +888,12 @@ func handleNopeResolved(gs *EKGameState, action GameAction) *ActionResult {
 	case "attack":
 		gs.handleAttack(playerID)
 	case "future_vision":
-		peekCount := min(3, len(gs.Deck))
-		var peekCards []string
-		if peekCount > 0 {
-			peekCards = make([]string, peekCount)
-			for i := 0; i < peekCount; i++ {
-				peekCards[i] = gs.Deck[len(gs.Deck)-1-i]
-			}
-		}
 		gs.addLog(playerID, "peeked at the top 3 cards. 🔮")
-		result := &ActionResult{
-			State: gs,
-			Messages: []WSMessage{
-				{Type: "state_updated", Payload: gs},
-			},
+		return &ActionResult{
+			State:    gs,
+			Messages: []WSMessage{{Type: "state_updated", Payload: gs}},
+			Prompt:   gs.peekTop(playerID, 3),
 		}
-		if len(peekCards) > 0 {
-			result.Prompt = &WSMessage{
-				Type: "peek_cards",
-				Payload: map[string]interface{}{
-					"cards": peekCards,
-				},
-			}
-		}
-		return result
 	case "shuffle":
 		gs.Deck = Shuffle(gs.Deck)
 		gs.addLog(playerID, "shuffled the deck. 🔄")
@@ -882,36 +952,16 @@ func handleNopeResolved(gs *EKGameState, action GameAction) *ActionResult {
 		gs.Deck = append(newDeck, removedCards...)
 		gs.addLog(playerID, fmt.Sprintf("removed %d explosive card(s) and placed them on top of the deck! 💣", removed))
 	case "mark":
-		if len(gs.Deck) >= 3 {
-			gs.addLog(playerID, "marked the deck — peeked at the top 3 cards. 📍")
+		gs.addLog(playerID, "marked the deck — peeked at the top 3 cards. 📍")
+		return &ActionResult{
+			State:    gs,
+			Messages: []WSMessage{{Type: "state_updated", Payload: gs}},
+			Prompt:   gs.peekTop(playerID, 3),
 		}
 	case "bury":
-		if len(player.Hand) > 0 && len(gs.Deck) > 0 {
-			buryIdx := rand.Intn(len(player.Hand))
-			buriedCard := player.Hand[buryIdx]
-			player.Hand = append(player.Hand[:buryIdx], player.Hand[buryIdx+1:]...)
-			pos := rand.Intn(len(gs.Deck) + 1)
-			gs.Deck = append(gs.Deck[:pos], append([]string{buriedCard}, gs.Deck[pos:]...)...)
-			gs.addLog(playerID, "buried a card in the deck. ⚰️")
-		}
+		return gs.startBury(playerID)
 	case "dig_deeper":
-		drawCount := min(3, len(gs.Deck))
-		if drawCount > 0 {
-			drawn := make([]string, drawCount)
-			for i := 0; i < drawCount; i++ {
-				drawn[i] = gs.Deck[len(gs.Deck)-1]
-				gs.Deck = gs.Deck[:len(gs.Deck)-1]
-			}
-			keepIdx := rand.Intn(len(drawn))
-			kept := drawn[keepIdx]
-			player.Hand = append(player.Hand, kept)
-			for i := len(drawn) - 1; i >= 0; i-- {
-				if i != keepIdx {
-					gs.Deck = append(gs.Deck, drawn[i])
-				}
-			}
-			gs.addLog(playerID, fmt.Sprintf("dug deeper and kept 1 of %d cards! ⛏️", drawCount))
-		}
+		return gs.startDigDeeper(playerID)
 	case "favor":
 		if gs.PendingFavor != nil && gs.PendingFavor.TargetID != "" {
 			gs.addLog("system", fmt.Sprintf("%s must give a card to %s. 🎁", gs.PendingFavor.TargetID, playerID))
@@ -924,13 +974,12 @@ func handleNopeResolved(gs *EKGameState, action GameAction) *ActionResult {
 		}
 		return gs.handleFavor(playerID, cardName)
 	case "clone":
-		turnAdvanced := gs.handleClone(playerID, cardName)
-		if turnAdvanced {
+		turnAdvanced, prompt := gs.handleClone(playerID, cardName)
+		if turnAdvanced || prompt != nil {
 			return &ActionResult{
-				State: gs,
-				Messages: []WSMessage{
-					{Type: "state_updated", Payload: gs},
-				},
+				State:    gs,
+				Messages: []WSMessage{{Type: "state_updated", Payload: gs}},
+				Prompt:   prompt,
 			}
 		}
 	case "combo":
@@ -944,7 +993,7 @@ func handleNopeResolved(gs *EKGameState, action GameAction) *ActionResult {
 		break
 	}
 
-	if cat != "skip" && cat != "super_skip" && cat != "reverse" && cat != "attack" {
+	if turnEndingCategories[cat] {
 		gs.advanceTurn()
 	}
 
@@ -1023,14 +1072,7 @@ func handleResolveDefuse(gs *EKGameState, action GameAction) *ActionResult {
 
 	player.Hand = append(player.Hand[:defuseIdx], player.Hand[defuseIdx+1:]...)
 
-	pos := len(gs.Deck) - data.Position
-	if pos < 0 {
-		pos = 0
-	}
-	if pos > len(gs.Deck) {
-		pos = len(gs.Deck)
-	}
-	gs.Deck = append(gs.Deck[:pos], append([]string{explosiveID}, gs.Deck[pos:]...)...)
+	gs.insertIntoDeck(explosiveID, data.Position)
 
 	gs.addLog(action.Player, "used a Defense card to defuse it! 🛡️")
 
@@ -1049,6 +1091,111 @@ func handleResolveDefuse(gs *EKGameState, action GameAction) *ActionResult {
 			{Type: "state_updated", Payload: gs},
 		},
 	}
+}
+
+// startBury takes the top card off the deck without showing it to anybody, and
+// waits for the player to say where it should go back in.
+func (gs *EKGameState) startBury(playerID string) *ActionResult {
+	if len(gs.Deck) == 0 {
+		gs.addLog(playerID, "played Bury, but the deck was empty. ⚰️")
+		gs.advanceTurn()
+		return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+	}
+
+	card := gs.Deck[len(gs.Deck)-1]
+	gs.Deck = gs.Deck[:len(gs.Deck)-1]
+	gs.PendingChoice = &PendingChoiceState{
+		PlayerID: playerID,
+		Kind:     "bury",
+		Cards:    []string{card},
+		DeckSize: len(gs.Deck),
+	}
+	gs.addLog(playerID, "played Bury — placing the top card back in the deck. ⚰️")
+	return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+}
+
+// startDigDeeper turns up the top few cards for the player to choose one from.
+func (gs *EKGameState) startDigDeeper(playerID string) *ActionResult {
+	drawCount := min(3, len(gs.Deck))
+	if drawCount == 0 {
+		gs.addLog(playerID, "played Dig Deeper, but the deck was empty. ⛏️")
+		gs.advanceTurn()
+		return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+	}
+
+	drawn := make([]string, drawCount)
+	for i := 0; i < drawCount; i++ {
+		drawn[i] = gs.Deck[len(gs.Deck)-1]
+		gs.Deck = gs.Deck[:len(gs.Deck)-1]
+	}
+	gs.PendingChoice = &PendingChoiceState{
+		PlayerID: playerID,
+		Kind:     "dig_deeper",
+		Cards:    drawn,
+		DeckSize: len(gs.Deck),
+	}
+	gs.addLog(playerID, fmt.Sprintf("played Dig Deeper — choosing 1 of %d cards. ⛏️", drawCount))
+	return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+}
+
+func handleResolveChoice(gs *EKGameState, action GameAction) *ActionResult {
+	if gs.PendingChoice == nil {
+		return reject(gs, "there's nothing to place right now")
+	}
+	if gs.PendingChoice.PlayerID != action.Player {
+		return reject(gs, "that's not your card to place")
+	}
+
+	var data struct {
+		Index    int `json:"index"`
+		Position int `json:"position"`
+	}
+	if err := json.Unmarshal(action.Data, &data); err != nil {
+		return reject(gs, "invalid choice")
+	}
+
+	choice := gs.PendingChoice
+	player := gs.Players[choice.PlayerID]
+	gs.PendingChoice = nil
+
+	switch choice.Kind {
+	case "bury":
+		if len(choice.Cards) > 0 {
+			gs.insertIntoDeck(choice.Cards[0], data.Position)
+		}
+		gs.addLog(action.Player, "buried the card in the deck. ⚰️")
+
+	case "dig_deeper":
+		if data.Index < 0 || data.Index >= len(choice.Cards) {
+			data.Index = 0
+		}
+		if player != nil {
+			player.Hand = append(player.Hand, choice.Cards[data.Index])
+		}
+		// The rest go back the way they came, keeping their order.
+		for i := len(choice.Cards) - 1; i >= 0; i-- {
+			if i != data.Index {
+				gs.Deck = append(gs.Deck, choice.Cards[i])
+			}
+		}
+		gs.addLog(action.Player, fmt.Sprintf("dug deeper and kept %s! ⛏️", CardLabel(choice.Cards[data.Index])))
+	}
+
+	gs.advanceTurn()
+	return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+}
+
+// insertIntoDeck puts a card back position cards down from the top, where the
+// top is what gets drawn next. Both Defuse and Bury count positions this way.
+func (gs *EKGameState) insertIntoDeck(card string, position int) {
+	pos := len(gs.Deck) - position
+	if pos < 0 {
+		pos = 0
+	}
+	if pos > len(gs.Deck) {
+		pos = len(gs.Deck)
+	}
+	gs.Deck = append(gs.Deck[:pos], append([]string{card}, gs.Deck[pos:]...)...)
 }
 
 func handleResolveGarbageCollection(gs *EKGameState, action GameAction) *ActionResult {
@@ -1087,32 +1234,9 @@ func handleResolveGarbageCollection(gs *EKGameState, action GameAction) *ActionR
 	player.Hand = append(player.Hand[:cardIdx], player.Hand[cardIdx+1:]...)
 	gs.PendingGarbage.Responded[action.Player] = card
 
-	cardData := GetCardData(card)
-	cardName := card
-	if cardData != nil {
-		cardName = cardData.Name
-	}
-	gs.addLog(action.Player, fmt.Sprintf("chose %s to put into the deck. 🗑️", cardName))
+	gs.addLog(action.Player, fmt.Sprintf("chose %s to put into the deck. 🗑️", CardLabel(card)))
 
-	allResponded := true
-	for _, name := range gs.TurnOrder {
-		if p := gs.Players[name]; p != nil && p.Alive && len(p.Hand) > 0 {
-			if _, ok := gs.PendingGarbage.Responded[name]; !ok {
-				allResponded = false
-				break
-			}
-		}
-	}
-
-	if allResponded {
-		for _, cardID := range gs.PendingGarbage.Responded {
-			pos := rand.Intn(len(gs.Deck) + 1)
-			gs.Deck = append(gs.Deck[:pos], append([]string{cardID}, gs.Deck[pos:]...)...)
-		}
-		gs.Deck = Shuffle(gs.Deck)
-		gs.PendingGarbage = nil
-		gs.addLog("system", "All players have chosen! The deck has been shuffled. 🗑️🔄")
-	}
+	gs.finishGarbageCollectionIfDone()
 
 	return &ActionResult{
 		State: gs,
@@ -1138,6 +1262,22 @@ type ComboResult struct {
 	Category string
 	Count    int
 	Cards    []string
+}
+
+// cardsMatch reports whether naming one card should catch the other. A player
+// names a card by what it does — "an Attack" — but the deck holds five separate
+// Attack ids, so matching on the id alone meant a three-of-a-kind steal nearly
+// always came up empty. Cat cards are the exception: a Tacocat is not a
+// Cattermelon, and telling them apart is the whole point of them.
+func cardsMatch(named, held string) bool {
+	if named == held {
+		return true
+	}
+	cat := GetCardCategory(named)
+	if cat == "unknown" || cat != GetCardCategory(held) {
+		return false
+	}
+	return cat != "cat_cards"
 }
 
 func detectCombo(cards []string) *ComboResult {
@@ -1188,26 +1328,38 @@ func detectCombo(cards []string) *ComboResult {
 	}
 
 	catCounts := map[string][]string{}
+	catOrder := []string{}
 	for _, c := range cards {
 		cat := GetCardCategory(c)
+		if _, seen := catCounts[cat]; !seen {
+			catOrder = append(catOrder, cat)
+		}
 		catCounts[cat] = append(catCounts[cat], c)
 	}
 
-	for cat, catCards := range catCounts {
+	// Walk the categories in the order the player selected them, so the server
+	// picks the same combo the client previewed.
+	for _, cat := range catOrder {
+		catCards := catCounts[cat]
 		if len(catCards) < 2 {
 			continue
 		}
 
 		if cat == "cat_cards" {
 			idCounts := map[string][]string{}
+			idOrder := []string{}
 			for _, c := range catCards {
 				data := GetCardData(c)
-				if data != nil {
-					idCounts[data.ID] = append(idCounts[data.ID], c)
+				if data == nil {
+					continue
 				}
+				if _, seen := idCounts[data.ID]; !seen {
+					idOrder = append(idOrder, data.ID)
+				}
+				idCounts[data.ID] = append(idCounts[data.ID], c)
 			}
-			for _, idCards := range idCounts {
-				if len(idCards) >= 2 {
+			for _, id := range idOrder {
+				if idCards := idCounts[id]; len(idCards) >= 2 {
 					return &ComboResult{
 						Category: cat,
 						Count:    len(idCards),
@@ -1224,6 +1376,39 @@ func detectCombo(cards []string) *ComboResult {
 		}
 	}
 	return nil
+}
+
+// turnEndingCategories are the cards that finish the turn of the player who
+// played them. Skip, Super Skip, Reverse and Attack end it too, but they pass
+// the turn themselves, in their own handlers.
+//
+// Everything absent from this list — Shuffle, See the Future, Swap Top &
+// Bottom, Mark, a lone cat card — leaves the player to act again and, in the
+// end, draw. Turn-ending used to be the default, which made a Shuffle a free
+// Skip.
+var turnEndingCategories = map[string]bool{
+	"draw_from_bottom": true, // the card off the bottom is the turn's draw
+	"dig_deeper":       true,
+	"bury":             true,
+	"catomic_bomb":     true,
+}
+
+// peekTop returns a prompt showing playerID the top n cards of the deck, or nil
+// when there is nothing to see.
+func (gs *EKGameState) peekTop(playerID string, n int) *WSMessage {
+	count := min(n, len(gs.Deck))
+	if count <= 0 {
+		return nil
+	}
+	cards := make([]string, count)
+	for i := 0; i < count; i++ {
+		cards[i] = gs.Deck[len(gs.Deck)-1-i]
+	}
+	return &WSMessage{
+		Type:    "peek_cards",
+		Player:  playerID,
+		Payload: map[string]interface{}{"cards": cards},
+	}
 }
 
 func (gs *EKGameState) handleSkip(playerID string) {
@@ -1246,10 +1431,16 @@ func (gs *EKGameState) handleSuperSkip(playerID string) {
 
 func (gs *EKGameState) handleReverse(playerID string) {
 	gs.ReverseDirection = !gs.ReverseDirection
+	// Like Skip, this ends one turn — under an Attack that is one of the
+	// forced turns, not all of them.
 	if gs.AttackStack > 0 {
 		gs.AttackStack--
+		if gs.AttackStack == 0 {
+			gs.advanceTurn()
+		}
+	} else {
+		gs.advanceTurn()
 	}
-	gs.advanceTurn()
 	direction := "forward"
 	if gs.ReverseDirection {
 		direction = "reverse"
@@ -1295,6 +1486,43 @@ func (gs *EKGameState) advanceTurn() {
 	}
 }
 
+// alivePlayers lists the players still in the game, in turn order.
+func (gs *EKGameState) alivePlayers() []string {
+	alive := []string{}
+	for _, name := range gs.TurnOrder {
+		if p := gs.Players[name]; p != nil && p.Alive {
+			alive = append(alive, name)
+		}
+	}
+	return alive
+}
+
+// finishGarbageCollectionIfDone closes a Garbage Collection once everyone who
+// owes a card has given one, and reports whether it did. It is checked after a
+// player responds, and again after a player leaves: someone with no hand left
+// owes nothing, so a departure can complete the set on its own.
+func (gs *EKGameState) finishGarbageCollectionIfDone() bool {
+	if gs.PendingGarbage == nil {
+		return false
+	}
+	for _, name := range gs.TurnOrder {
+		if p := gs.Players[name]; p != nil && p.Alive && len(p.Hand) > 0 {
+			if _, responded := gs.PendingGarbage.Responded[name]; !responded {
+				return false
+			}
+		}
+	}
+
+	for _, cardID := range gs.PendingGarbage.Responded {
+		pos := rand.Intn(len(gs.Deck) + 1)
+		gs.Deck = append(gs.Deck[:pos], append([]string{cardID}, gs.Deck[pos:]...)...)
+	}
+	gs.Deck = Shuffle(gs.Deck)
+	gs.PendingGarbage = nil
+	gs.addLog("system", "All players have chosen! The deck has been shuffled. 🗑️🔄")
+	return true
+}
+
 func (gs *EKGameState) eliminatePlayer(name string) {
 	player := gs.Players[name]
 	if player == nil {
@@ -1305,28 +1533,26 @@ func (gs *EKGameState) eliminatePlayer(name string) {
 	player.Hand = []string{}
 	gs.addLog(name, "was eliminated! 💀")
 
-	alive := []string{}
-	for _, n := range gs.TurnOrder {
-		if gs.Players[n] != nil && gs.Players[n].Alive {
-			alive = append(alive, n)
-		}
-	}
-	if len(alive) <= 1 {
-		var winner *string
-		if len(alive) == 1 {
-			winner = &alive[0]
-		}
-		gs.endGame(winner)
+	if alive := gs.alivePlayers(); len(alive) <= 1 {
+		gs.endGame(alive)
 	}
 }
 
-func (gs *EKGameState) endGame(winner *string) {
+// endGame ends the game with the given survivors. More than one means the deck
+// ran out before they did, and they share the win.
+func (gs *EKGameState) endGame(winners []string) {
 	gs.Phase = "ended"
-	gs.Winner = winner
-	if winner != nil {
-		gs.addLog("system", fmt.Sprintf("🎉 %s wins the game!", *winner))
-	} else {
+	gs.Winners = winners
+	gs.Winner = nil
+
+	switch len(winners) {
+	case 0:
 		gs.addLog("system", "💀 Everyone was eliminated! No winner.")
+	case 1:
+		gs.Winner = &winners[0]
+		gs.addLog("system", fmt.Sprintf("🎉 %s wins the game!", winners[0]))
+	default:
+		gs.addLog("system", fmt.Sprintf("🏁 The deck ran out — %s survive and share the win!", strings.Join(winners, ", ")))
 	}
 }
 
@@ -1358,6 +1584,11 @@ func StartNopeWindowTimer(mu *sync.Mutex, gs *EKGameState, processNopeResolved f
 		return
 	}
 
+	if gs.NopeTimer != nil {
+		gs.NopeTimer.Stop()
+		gs.NopeTimer = nil
+	}
+
 	expiresAt := time.Now().Add(NOPE_WINDOW_SECONDS * time.Second)
 	gs.NopeWindow.ExpiredAt = &expiresAt
 
@@ -1380,10 +1611,14 @@ func StartTurnTimer(mu *sync.Mutex, gs *EKGameState, forceDraw func(), timerSeco
 		gs.TurnTimer.Stop()
 		gs.TurnTimer = nil
 	}
+	gs.TurnEndsAt = nil
 
 	if timerSeconds <= 0 || gs.Phase != "playing" {
 		return
 	}
+
+	endsAt := time.Now().Add(time.Duration(timerSeconds) * time.Second)
+	gs.TurnEndsAt = &endsAt
 
 	gs.TurnTimer = time.AfterFunc(time.Duration(timerSeconds)*time.Second, func() {
 		mu.Lock()
@@ -1394,6 +1629,7 @@ func StartTurnTimer(mu *sync.Mutex, gs *EKGameState, forceDraw func(), timerSeco
 		}
 
 		gs.TurnTimer = nil
+		gs.TurnEndsAt = nil
 		forceDraw()
 	})
 }
@@ -1403,17 +1639,139 @@ func CancelPendingAction(gs *EKGameState) {
 		close(gs.CancelFunc)
 		gs.CancelFunc = nil
 	}
-	if gs.NopeTimer != nil {
-		gs.NopeTimer.Stop()
-		gs.NopeTimer = nil
-	}
-	if gs.TurnTimer != nil {
-		gs.TurnTimer.Stop()
-		gs.TurnTimer = nil
-	}
+	CancelTimers(gs)
 	gs.NopeWindow = nil
 	gs.PendingDefuse = nil
 	gs.PendingFavor = nil
+	gs.PendingChoice = nil
+}
+
+// CancelTimers stops every clock without touching the state itself.
+func CancelTimers(gs *EKGameState) {
+	gs.TurnEndsAt = nil
+	for _, t := range []**time.Timer{&gs.NopeTimer, &gs.TurnTimer, &gs.PendingTimer} {
+		if *t != nil {
+			(*t).Stop()
+			*t = nil
+		}
+	}
+}
+
+// StartPendingTimer puts a deadline on an unanswered prompt. onExpire runs with
+// the room mutex held, exactly as the other timers do.
+func StartPendingTimer(mu *sync.Mutex, gs *EKGameState, onExpire func()) {
+	if gs.PendingTimer != nil {
+		gs.PendingTimer.Stop()
+		gs.PendingTimer = nil
+	}
+	if gs.pendingPrompt() == "" || gs.Phase != "playing" {
+		return
+	}
+
+	gs.PendingTimer = time.AfterFunc(PENDING_TIMEOUT_SECONDS*time.Second, func() {
+		mu.Lock()
+		defer mu.Unlock()
+		gs.PendingTimer = nil
+		if gs.pendingPrompt() == "" || gs.Phase != "playing" {
+			return
+		}
+		onExpire()
+	})
+}
+
+// pendingPrompt names the prompt the table is waiting on, if any. A Nope window
+// is not one: it has its own, shorter clock.
+func (gs *EKGameState) pendingPrompt() string {
+	switch {
+	case gs.PendingDefuse != nil:
+		return "defuse"
+	case gs.PendingGarbage != nil:
+		return "garbage"
+	case gs.PendingFavor != nil:
+		return "favor"
+	case gs.PendingChoice != nil:
+		return "choice"
+	}
+	return ""
+}
+
+// AutoResolvePending answers the open prompt on behalf of whoever left it
+// hanging, choosing at random so it never advantages the absent player.
+func AutoResolvePending(gs *EKGameState) *ActionResult {
+	switch gs.pendingPrompt() {
+	case "defuse":
+		playerID := gs.PendingDefuse.PlayerID
+		pos := 0
+		if len(gs.Deck) > 0 {
+			pos = rand.Intn(len(gs.Deck) + 1)
+		}
+		data, _ := json.Marshal(map[string]interface{}{"useDefuse": true, "position": pos})
+		gs.addLog(playerID, "ran out of time — the Explosive card was buried for them. ⏰")
+		return handleResolveDefuse(gs, GameAction{Action: "resolveDefuse", Data: data, Player: playerID})
+
+	case "favor":
+		if gs.PendingFavor.TargetID == "" {
+			playerID := gs.PendingFavor.PlayerID
+			targets := []string{}
+			for _, name := range gs.TurnOrder {
+				if p := gs.Players[name]; name != playerID && p != nil && p.Alive && len(p.Hand) > 0 {
+					targets = append(targets, name)
+				}
+			}
+			if len(targets) == 0 {
+				gs.PendingFavor = nil
+				return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+			}
+			target := targets[rand.Intn(len(targets))]
+			data, _ := json.Marshal(map[string]string{"targetId": target})
+			gs.addLog(playerID, "ran out of time — a Favor target was picked for them. ⏰")
+			return handleResolveFavor(gs, GameAction{Action: "resolveFavor", Data: data, Player: playerID})
+		}
+
+		targetID := gs.PendingFavor.TargetID
+		target := gs.Players[targetID]
+		if target == nil || len(target.Hand) == 0 {
+			gs.PendingFavor = nil
+			return &ActionResult{State: gs, Messages: []WSMessage{{Type: "state_updated", Payload: gs}}}
+		}
+		card := target.Hand[rand.Intn(len(target.Hand))]
+		data, _ := json.Marshal(map[string]string{"cardId": card})
+		gs.addLog(targetID, "ran out of time — a card was given for them. ⏰")
+		return handleResolveFavor(gs, GameAction{Action: "resolveFavor", Data: data, Player: targetID})
+
+	case "choice":
+		choice := gs.PendingChoice
+		data := map[string]int{}
+		if choice.Kind == "bury" {
+			data["position"] = rand.Intn(choice.DeckSize + 1)
+		} else {
+			data["index"] = rand.Intn(max(1, len(choice.Cards)))
+		}
+		blob, _ := json.Marshal(data)
+		gs.addLog(choice.PlayerID, "ran out of time — the card was placed for them. ⏰")
+		return handleResolveChoice(gs, GameAction{Action: "resolveChoice", Data: blob, Player: choice.PlayerID})
+
+	case "garbage":
+		var last *ActionResult
+		for _, name := range gs.TurnOrder {
+			if gs.PendingGarbage == nil {
+				break
+			}
+			p := gs.Players[name]
+			if p == nil || !p.Alive || len(p.Hand) == 0 {
+				continue
+			}
+			if _, done := gs.PendingGarbage.Responded[name]; done {
+				continue
+			}
+			card := p.Hand[rand.Intn(len(p.Hand))]
+			data, _ := json.Marshal(map[string]string{"cardId": card})
+			gs.addLog(name, "ran out of time — a card was picked for them. ⏰")
+			last = handleResolveGarbageCollection(gs, GameAction{Action: "resolveGarbageCollection", Data: data, Player: name})
+		}
+		return last
+	}
+	return nil
 }
 
 func (gs *EKGameState) handleFavor(playerID string, cardName string) *ActionResult {
@@ -1424,8 +1782,9 @@ func (gs *EKGameState) handleFavor(playerID string, cardName string) *ActionResu
 		}
 	}
 	if len(alive) == 0 {
+		// A Favor that finds nobody to ask is wasted, but it does not end the
+		// turn — no more than a successful one does.
 		gs.addLog(playerID, fmt.Sprintf("played %s, but no one had cards to give. 🎁", cardName))
-		gs.advanceTurn()
 		return &ActionResult{
 			State: gs,
 			Messages: []WSMessage{
@@ -1470,7 +1829,6 @@ func handleResolveFavor(gs *EKGameState, action GameAction) *ActionResult {
 		if target == nil || !target.Alive || len(target.Hand) == 0 {
 			gs.addLog(action.Player, fmt.Sprintf("tried to Favor %s, but they have no cards!", data.TargetID))
 			gs.PendingFavor = nil
-			gs.advanceTurn()
 			return &ActionResult{
 				State: gs,
 				Messages: []WSMessage{
@@ -1479,19 +1837,13 @@ func handleResolveFavor(gs *EKGameState, action GameAction) *ActionResult {
 			}
 		}
 		gs.PendingFavor.TargetID = data.TargetID
-		gs.addLog("system", fmt.Sprintf("%s chose %s as target. Others can Nope. ⏳", action.Player, data.TargetID))
-		gs.NopeWindow = &NopeWindowState{
+		return gs.openNopeWindow(&NopeWindowState{
 			PlayerID:      action.Player,
 			CardID:        "",
 			CardName:      "Favor",
 			Category:      "favor",
 			FavorTargetID: data.TargetID,
-		}
-		return &ActionResult{
-			State:      gs,
-			Messages:   []WSMessage{{Type: "state_updated", Payload: gs}},
-			NopeWindow: true,
-		}
+		}, fmt.Sprintf("asked %s for a Favor", data.TargetID))
 	}
 
 	// Phase 2: Target player selects a card to give
@@ -1543,59 +1895,47 @@ func handleResolveFavor(gs *EKGameState, action GameAction) *ActionResult {
 	}
 }
 
-func findOriginalCard(gs *EKGameState, cloneIndex int) string {
-	for i := cloneIndex - 1; i >= 0; i-- {
-		cardID := gs.Discard[i]
-		if GetCardCategory(cardID) != "clone" {
-			return cardID
-		}
+func (gs *EKGameState) handleClone(playerID string, cardName string) (bool, *WSMessage) {
+	original := gs.LastPlayed
+	if original == "" || original == "clone" {
+		gs.addLog(playerID, fmt.Sprintf("played %s, but there was nothing to clone. 👻", cardName))
+		return false, nil
 	}
-	return ""
+	label := categoryNameMap[original]
+	if label == "" {
+		label = original
+	}
+	gs.addLog(playerID, fmt.Sprintf("played %s, copying %s! 👻", cardName, label))
+	return executeCardEffect(gs, playerID, original)
 }
 
-func (gs *EKGameState) handleClone(playerID string, cardName string) bool {
-	if len(gs.Discard) < 2 {
-		gs.addLog(playerID, fmt.Sprintf("played %s, but there was nothing to clone. 👻", cardName))
-		return false
-	}
-	originalCard := findOriginalCard(gs, len(gs.Discard)-1)
-	if originalCard == "" {
-		gs.addLog(playerID, fmt.Sprintf("played %s, but there was nothing to clone. 👻", cardName))
-		return false
-	}
-	originalCat := GetCardCategory(originalCard)
-	gs.addLog(playerID, fmt.Sprintf("played %s, copying %s! 👻", cardName, originalCat))
-	return executeCardEffect(gs, playerID, originalCat)
-}
-
-func executeCardEffect(gs *EKGameState, playerID string, cat string) bool {
+// executeCardEffect runs a category's effect for a Clone. It reports whether the
+// turn was passed on, and any private prompt the copied card produces.
+func executeCardEffect(gs *EKGameState, playerID string, cat string) (bool, *WSMessage) {
 	player := gs.Players[playerID]
 	if player == nil {
-		return false
+		return false, nil
 	}
 
 	switch cat {
 	case "skip":
 		gs.handleSkip(playerID)
-		return true
+		return true, nil
 	case "super_skip":
 		gs.handleSuperSkip(playerID)
-		return true
+		return true, nil
 	case "reverse":
 		gs.handleReverse(playerID)
-		return true
+		return true, nil
 	case "attack":
 		gs.handleAttack(playerID)
-		return true
+		return true, nil
 	case "future_vision":
-		peekCount := min(3, len(gs.Deck))
-		if peekCount > 0 {
-			topCards := make([]string, peekCount)
-			for i := 0; i < peekCount; i++ {
-				topCards[i] = gs.Deck[len(gs.Deck)-1-i]
-			}
-			gs.addLog(playerID, "cloned See the Future. 🔮")
-		}
+		gs.addLog(playerID, "cloned See the Future. 🔮")
+		return false, gs.peekTop(playerID, 3)
+	case "mark":
+		gs.addLog(playerID, "cloned Mark. 📍")
+		return false, gs.peekTop(playerID, 3)
 	case "shuffle":
 		gs.Deck = Shuffle(gs.Deck)
 		gs.addLog(playerID, "cloned Shuffle. 🔄")
@@ -1627,32 +1967,11 @@ func executeCardEffect(gs *EKGameState, playerID string, cat string) bool {
 		gs.Deck = append(newDeck, removedCards...)
 		gs.addLog(playerID, fmt.Sprintf("cloned Catomic Bomb! Removed %d explosive(s). 💣", removed))
 	case "bury":
-		if len(player.Hand) > 0 && len(gs.Deck) > 0 {
-			buryIdx := rand.Intn(len(player.Hand))
-			buriedCard := player.Hand[buryIdx]
-			player.Hand = append(player.Hand[:buryIdx], player.Hand[buryIdx+1:]...)
-			pos := rand.Intn(len(gs.Deck) + 1)
-			gs.Deck = append(gs.Deck[:pos], append([]string{buriedCard}, gs.Deck[pos:]...)...)
-			gs.addLog(playerID, "cloned Bury. ⚰️")
-		}
+		gs.addLog(playerID, "cloned Bury. ⚰️")
+		gs.startBury(playerID)
 	case "dig_deeper":
-		drawCount := min(3, len(gs.Deck))
-		if drawCount > 0 {
-			drawn := make([]string, drawCount)
-			for i := 0; i < drawCount; i++ {
-				drawn[i] = gs.Deck[len(gs.Deck)-1]
-				gs.Deck = gs.Deck[:len(gs.Deck)-1]
-			}
-			keepIdx := rand.Intn(len(drawn))
-			kept := drawn[keepIdx]
-			player.Hand = append(player.Hand, kept)
-			for i := len(drawn) - 1; i >= 0; i-- {
-				if i != keepIdx {
-					gs.Deck = append(gs.Deck, drawn[i])
-				}
-			}
-			gs.addLog(playerID, fmt.Sprintf("cloned Dig Deeper and kept 1 of %d cards! ⛏️", drawCount))
-		}
+		gs.addLog(playerID, "cloned Dig Deeper. ⛏️")
+		gs.startDigDeeper(playerID)
 	case "garbage_collection":
 		alive := []string{}
 		for _, name := range gs.TurnOrder {
@@ -1662,34 +1981,120 @@ func executeCardEffect(gs *EKGameState, playerID string, cat string) bool {
 		}
 		if len(alive) == 0 {
 			gs.addLog(playerID, "cloned Garbage Collection, but no one had cards. 🗑️")
-			return false
+			return false, nil
 		}
 		gs.PendingGarbage = &GarbageCollectionState{
 			PlayerID:  playerID,
 			Responded: make(map[string]string),
 		}
 		gs.addLog(playerID, "cloned Garbage Collection! Everyone must discard. 🗑️")
-	case "mark":
-		if len(gs.Deck) >= 3 {
-			gs.addLog(playerID, "cloned Mark. 📍")
-		}
 	case "favor":
 		gs.addLog(playerID, "cloned Favor! 🎁")
 	default:
 		gs.addLog(playerID, fmt.Sprintf("played Clone, copying %s.", cat))
 	}
-	return false
+	return false, nil
 }
 
-func ResetTurnTimer(gs *EKGameState, timerSeconds int) {
-	if gs.TurnTimer != nil {
-		gs.TurnTimer.Stop()
-		gs.TurnTimer = nil
+// --- Per-player views ---------------------------------------------------
+//
+// The full EKGameState holds every hand and the deck in draw order. Sending it
+// to the room hands every player a map of where the Exploding Kittens are, so
+// clients are never given it: each one receives the game as they are entitled
+// to see it.
+
+type PlayerView struct {
+	Color     string   `json:"color"`
+	Hand      []string `json:"hand"`
+	HandCount int      `json:"handCount"`
+	Alive     bool     `json:"alive"`
+}
+
+type GameView struct {
+	Players          map[string]*PlayerView `json:"players"`
+	DeckCount        int                    `json:"deckCount"`
+	Discard          []string               `json:"discard"`
+	Turn             string                 `json:"turn"`
+	TurnOrder        []string               `json:"turnOrder"`
+	Phase            string                 `json:"phase"`
+	Winner           *string                `json:"winner"`
+	Winners          []string               `json:"winners,omitempty"`
+	TurnEndsAt       *time.Time             `json:"turnEndsAt,omitempty"`
+	Log              []LogEntry             `json:"log"`
+	AttackStack      int                    `json:"attackStack"`
+	ReverseDirection bool                   `json:"reverseDirection"`
+
+	NopeWindow     *NopeWindowState        `json:"NopeWindow,omitempty"`
+	PendingDefuse  *DefuseState            `json:"PendingDefuse,omitempty"`
+	PendingGarbage *GarbageCollectionState `json:"PendingGarbage,omitempty"`
+	PendingFavor   *PendingFavorState      `json:"PendingFavor,omitempty"`
+	PendingChoice  *PendingChoiceState     `json:"PendingChoice,omitempty"`
+}
+
+// ViewFor renders the game as one player may see it: their own hand in full,
+// everyone else's as a count, and the deck as nothing but its size. Once the
+// game is over every hand is revealed, so the table can see how it ended.
+func (gs *EKGameState) ViewFor(viewer string) *GameView {
+	view := &GameView{
+		Players:          make(map[string]*PlayerView, len(gs.Players)),
+		DeckCount:        len(gs.Deck),
+		Discard:          gs.Discard,
+		Turn:             gs.Turn,
+		TurnOrder:        gs.TurnOrder,
+		Phase:            gs.Phase,
+		Winner:           gs.Winner,
+		Winners:          gs.Winners,
+		TurnEndsAt:       gs.TurnEndsAt,
+		Log:              gs.Log,
+		AttackStack:      gs.AttackStack,
+		ReverseDirection: gs.ReverseDirection,
+		NopeWindow:       gs.NopeWindow,
+		PendingGarbage:   gs.PendingGarbage,
+		PendingFavor:     gs.PendingFavor,
+	}
+	if view.Discard == nil {
+		view.Discard = []string{}
+	}
+	if view.TurnOrder == nil {
+		view.TurnOrder = []string{}
+	}
+	if view.Log == nil {
+		view.Log = []LogEntry{}
 	}
 
-	if timerSeconds <= 0 || gs.Phase != "playing" {
-		return
+	// A pending choice carries cards only that player may see — and for Bury,
+	// not even they may see the card they are placing.
+	if gs.PendingChoice != nil {
+		pc := *gs.PendingChoice
+		if pc.PlayerID != viewer || pc.Kind == "bury" {
+			pc.Cards = nil
+		}
+		view.PendingChoice = &pc
 	}
 
-	gs.TurnTimer = time.AfterFunc(time.Duration(timerSeconds)*time.Second, nil)
+	// A defuse prompt names the card that was drawn, so it stays with the one
+	// player who is deciding what to do about it.
+	if gs.PendingDefuse != nil && gs.PendingDefuse.PlayerID == viewer {
+		view.PendingDefuse = gs.PendingDefuse
+	} else if gs.PendingDefuse != nil {
+		view.PendingDefuse = &DefuseState{PlayerID: gs.PendingDefuse.PlayerID}
+	}
+
+	revealAll := gs.Phase == "ended"
+	for name, p := range gs.Players {
+		if p == nil {
+			continue
+		}
+		pv := &PlayerView{
+			Color:     p.Color,
+			Hand:      []string{},
+			HandCount: len(p.Hand),
+			Alive:     p.Alive,
+		}
+		if name == viewer || revealAll {
+			pv.Hand = append([]string{}, p.Hand...)
+		}
+		view.Players[name] = pv
+	}
+	return view
 }

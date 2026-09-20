@@ -1,23 +1,26 @@
 <template>
-  <div v-if="store.cardNameInputModal.show" class="modal" ref="modalRef">
-    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cardname-modal-title">
-      <h2 id="cardname-modal-title">{{ store.cardNameInputModal.title }}</h2>
-      <p>{{ store.cardNameInputModal.desc }}</p>
-      <input
-        ref="inputRef"
-        v-model="cardName"
-        class="card-input"
-        type="text"
-        placeholder="Type card name..."
-        @keyup.enter="submit"
-        @keyup.escape="cancel"
-      />
-      <div class="modal-actions">
-        <button class="btn" @click="submit" :disabled="!cardName.trim()">Confirm</button>
-        <button class="btn btn-secondary" @click="cancel">Cancel</button>
+  <Transition name="modal">
+    <div v-if="store.cardNameInputModal.show" class="modal" data-testid="cardname-modal" ref="modalRef">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="cardname-modal-title">
+        <h2 id="cardname-modal-title">{{ store.cardNameInputModal.title }}</h2>
+        <p>{{ store.cardNameInputModal.desc }}</p>
+        <input
+          ref="inputRef"
+          v-model="cardName"
+          class="card-input"
+          data-testid="cardname-input"
+          type="text"
+          placeholder="Type card name..."
+          @keyup.enter="submit"
+          @keyup.escape="cancel"
+        />
+        <div class="modal-actions">
+          <button class="btn" data-testid="cardname-confirm" @click="submit" :disabled="!cardName.trim()">Confirm</button>
+          <button class="btn btn-secondary" @click="cancel">Cancel</button>
+        </div>
       </div>
     </div>
-  </div>
+  </Transition>
 </template>
 
 <script setup>
@@ -53,7 +56,9 @@ function cancel() {
   position: fixed;
   inset: 0;
   z-index: var(--z-modal);
-  background: rgba(21, 15, 12, 0.88);
+  /* Ink at 58% rather than a near-opaque black — on a light ground the game
+     behind the dialog should stay legible, not be blacked out. */
+  background: rgba(27, 14, 6, 0.58);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -61,24 +66,26 @@ function cancel() {
 }
 
 .modal-card {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 20px;
-  padding: 32px 28px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 30px 26px;
   max-width: 420px;
   width: 100%;
   text-align: center;
 }
 
 .modal-card h2 {
-  font-size: 1.3rem;
-  margin-bottom: 12px;
+  font-size: 1.45rem;
+  color: var(--ink);
+  margin-bottom: 10px;
 }
 
 .modal-card p {
-  color: var(--mild-cream);
-  opacity: 0.8;
-  font-size: 0.9rem;
+  color: var(--muted-cream);
+  font-size: 0.92rem;
+  font-weight: 700;
   line-height: 1.5;
   margin-bottom: 18px;
 }
@@ -86,23 +93,21 @@ function cancel() {
 .card-input {
   width: 100%;
   padding: 12px 16px;
-  border-radius: 12px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--steam-cream);
-  font-size: 1rem;
+  min-height: 52px;
+  border-radius: var(--radius-md);
+  border: var(--edge-w) solid var(--edge);
+  background: var(--sand);
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 800;
+  font-size: 1.05rem;
   outline: none;
-  transition: border-color var(--ease-standard);
   box-sizing: border-box;
 }
 
-.card-input:focus {
-  border-color: var(--chili-orange);
-}
-
 .card-input::placeholder {
-  color: var(--mild-cream);
-  opacity: 0.5;
+  color: var(--dim-text);
+  font-weight: 700;
 }
 
 .modal-actions {

@@ -2,6 +2,7 @@ package storage
 
 import (
 	"encoding/json"
+	"time"
 
 	"ping/models"
 )
@@ -13,11 +14,17 @@ type Store interface {
 	UpdateRoomStatus(roomID int64, status string) error
 	DeleteRoom(roomKey string) error
 	ListActiveRooms(game string) ([]models.RoomListItem, error)
+	TouchRoom(roomID int64) error
+	ListIdleRooms(statuses []string, cutoff time.Time) ([]models.Room, error)
+	PruneTimelines(keep int) (int64, error)
 
 	AddPlayer(roomID int64, playerName, color string) error
 	RemovePlayer(roomID int64, playerName string) error
 	RemovePlayerByRoomKey(roomKey string, playerName string) error
 	RemoveAllPlayers(roomID int64) error
+	MarkPlayerDisconnected(roomID int64, playerName string) error
+	MarkPlayerConnected(roomID int64, playerName string) (bool, error)
+	ListStalePlayers(cutoff time.Time) ([]models.StalePlayer, error)
 	GetRoomPlayers(roomID int64) ([]models.RoomPlayer, error)
 	IsPlayerInRoom(roomID int64, playerName string) (bool, error)
 	GetActivePlayerCount(roomID int64) (int, error)

@@ -19,6 +19,7 @@
       <div v-if="!inline && roomError" class="room-error">{{ roomError }}</div>
       <input
         type="text"
+        data-testid="join-name-input"
         v-model="name"
         :placeholder="namePlaceholder"
         maxlength="16"
@@ -41,7 +42,7 @@
           @keydown.space.prevent="chosenColor = c"
         ></div>
       </div>
-      <button class="btn" :disabled="!name.trim()" @click="join">{{ buttonText }}</button>
+      <button class="btn" data-testid="join-submit" :disabled="!name.trim()" @click="join">{{ buttonText }}</button>
       <button v-if="!inline" class="back-link" @click="emit('back')"><ArrowLeft :size="14" /> Back</button>
     </div>
   </div>
@@ -185,7 +186,7 @@ onUnmounted(() => {
   padding: 13px 16px;
   border-radius: 12px;
   border: 1px solid var(--line);
-  background: #1c1512;
+  background: var(--charcoal);
   color: var(--steam-cream);
   font-size: 1rem;
   outline: none;
@@ -214,33 +215,6 @@ onUnmounted(() => {
 
 .swatch.active {
   border-color: var(--steam-cream);
-}
-
-.btn {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  padding: 13px 28px;
-  border-radius: 100px;
-  font-weight: 600;
-  font-size: 0.95rem;
-  border: none;
-  cursor: pointer;
-  width: 100%;
-  background: linear-gradient(135deg, var(--chili-orange), var(--broth-red));
-  color: var(--steam-cream);
-  transition: transform 0.15s ease;
-}
-
-.btn:hover {
-  transform: translateY(-2px);
-}
-
-.btn:disabled {
-  opacity: 0.5;
-  cursor: default;
-  transform: none;
 }
 
 .room-status {
@@ -325,5 +299,166 @@ onUnmounted(() => {
 
 .back-link:hover {
   opacity: 1;
+}
+
+/* ─── Kitchen theme ───
+   This component is shared with Hotpot, so the rules above stay as the dark
+   default and the cartoon look is layered on only while EkView has
+   `theme-kitchen` on <html>. */
+
+/* The other Exploding Kitchen entry screens sit on striped paper, so the join
+   form matches rather than landing on a flat scrim on its own. */
+html.theme-kitchen .join-overlay {
+  background: var(--paper);
+}
+
+html.theme-kitchen .join-overlay:not(.inline)::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(circle at 50% 22%, rgba(255, 90, 43, 0.22), rgba(255, 232, 194, 0) 58%),
+    repeating-linear-gradient(-38deg, #ffdfae 0 26px, var(--paper) 26px 52px);
+  pointer-events: none;
+}
+
+/* The themed scrim above out-specifies the shared `.inline` reset, so the
+   inline variant has to opt out again here — otherwise the overlay's backdrop
+   paints as a grey block inside whatever card is hosting the form. */
+html.theme-kitchen .join-overlay.inline {
+  background: none;
+}
+
+html.theme-kitchen .join-card {
+  position: relative;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+  padding: 32px 26px;
+}
+
+/* Inline, this renders inside another card, so it drops its own shell. */
+html.theme-kitchen .join-overlay.inline .join-card {
+  background: none;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+}
+
+html.theme-kitchen .join-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 68px;
+  height: 68px;
+  margin-bottom: 14px;
+  background: var(--chili);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: 22px;
+  box-shadow: var(--lift);
+  color: var(--ink);
+  transform: rotate(-6deg);
+}
+
+html.theme-kitchen .join-card h1 {
+  color: var(--ink);
+}
+
+html.theme-kitchen .join-card p {
+  color: var(--muted-cream);
+  opacity: 1;
+  font-weight: 700;
+}
+
+html.theme-kitchen .join-card input {
+  min-height: 52px;
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-md);
+  background: var(--sand);
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 800;
+}
+
+html.theme-kitchen .join-card input::placeholder {
+  color: var(--dim-text);
+  font-weight: 700;
+}
+
+html.theme-kitchen .join-card input:focus-visible {
+  outline: 3px solid var(--chili);
+  outline-offset: 3px;
+}
+
+/* Eight swatches at a 44px target are wider than the card, so they lay out as
+   two rows of four rather than shrinking below the minimum tap size. */
+html.theme-kitchen .swatches {
+  display: grid;
+  grid-template-columns: repeat(4, 44px);
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 20px;
+}
+
+html.theme-kitchen .swatch {
+  width: 44px;
+  height: 44px;
+  border: 3px solid var(--edge);
+  box-shadow: 0 3px 0 var(--edge);
+  transition: var(--transition-interactive);
+}
+
+/* Selected is an inset cream ring — a colour change would fight the swatch's
+   own colour, which is the whole point of the control. */
+html.theme-kitchen .swatch.active {
+  box-shadow: 0 3px 0 var(--edge), inset 0 0 0 5px var(--surface);
+}
+
+html.theme-kitchen .room-status {
+  background: var(--sand);
+  border: 2.5px solid var(--edge);
+  border-radius: var(--radius-md);
+}
+
+html.theme-kitchen .room-status-badge {
+  border: 2px solid var(--edge);
+  font-weight: 800;
+  color: var(--ink);
+  background: var(--dim-fill);
+}
+
+html.theme-kitchen .room-status-badge.active {
+  color: var(--ink);
+  background: var(--mint);
+}
+
+html.theme-kitchen .room-player-count,
+html.theme-kitchen .room-player {
+  color: var(--mild-cream);
+  opacity: 1;
+  font-weight: 700;
+}
+
+html.theme-kitchen .room-player-dot {
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--edge);
+}
+
+html.theme-kitchen .room-error {
+  color: var(--broth);
+  font-weight: 800;
+}
+
+html.theme-kitchen .back-link {
+  min-height: 44px;
+  opacity: 1;
+  color: var(--muted-cream);
+  font-weight: 800;
+}
+
+html.theme-kitchen .back-link:hover {
+  color: var(--ink);
 }
 </style>

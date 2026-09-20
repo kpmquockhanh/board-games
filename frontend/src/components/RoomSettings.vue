@@ -1,6 +1,6 @@
 <template>
   <div class="room-settings" :class="{ collapsed: !expanded }">
-    <button class="settings-toggle" @click="expanded = !expanded">
+    <button class="settings-toggle" data-testid="settings-toggle" @click="expanded = !expanded">
       <span class="toggle-icon"><ChevronDown v-if="expanded" :size="14" /><ChevronRight v-else :size="14" /></span>
       <span class="toggle-label">Room Settings</span>
       <span class="toggle-hint" v-if="!expanded && !isDefault">customized</span>
@@ -31,9 +31,9 @@
           <div class="setting-label">Starting Hand</div>
           <div class="setting-row">
             <div class="stepper full">
-              <button class="stepper-btn" @click="dec('handSize', 4, 12)" :disabled="!editable">-</button>
+              <button class="stepper-btn" data-testid="handsize-dec" @click="dec('handSize', 4, 12)" :disabled="!editable">-</button>
               <span class="stepper-val">{{ settings.handSize }} cards</span>
-              <button class="stepper-btn" @click="inc('handSize', 4, 12)" :disabled="!editable">+</button>
+              <button class="stepper-btn" data-testid="handsize-inc" @click="inc('handSize', 4, 12)" :disabled="!editable">+</button>
             </div>
           </div>
         </div>
@@ -55,9 +55,9 @@
           <div class="setting-label">Explosive Cards</div>
           <div class="setting-row">
             <div class="stepper full">
-              <button class="stepper-btn" @click="dec('explosiveCount', 1, 10)" :disabled="!editable">-</button>
+              <button class="stepper-btn" data-testid="explosive-dec" @click="dec('explosiveCount', 1, 10)" :disabled="!editable">-</button>
               <span class="stepper-val">{{ settings.explosiveCount }}</span>
-              <button class="stepper-btn" @click="inc('explosiveCount', 1, 10)" :disabled="!editable">+</button>
+              <button class="stepper-btn" data-testid="explosive-inc" @click="inc('explosiveCount', 1, 10)" :disabled="!editable">+</button>
             </div>
           </div>
           <div class="setting-hint">Default: player count - 1</div>
@@ -137,6 +137,7 @@
             <label class="category-toggle">
               <input
                 type="checkbox"
+                :data-testid="'cat-toggle-' + key"
                 :checked="settings.enabledCategories[key]"
                 @change="toggleCategory(key)"
                 @click.stop
@@ -300,9 +301,10 @@ function closePreview() {
 
 <style scoped>
 .room-settings {
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 14px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-md);
+  box-shadow: var(--lift);
   overflow: hidden;
   margin-bottom: 12px;
 }
@@ -312,46 +314,56 @@ function closePreview() {
   align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 10px 14px;
-  background: none;
+  padding: 12px 14px;
+  min-height: 52px;
+  background: var(--gold);
   border: none;
-  color: var(--steam-cream);
-  font-family: inherit;
-  font-size: 0.85rem;
-  font-weight: 600;
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 800;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: var(--transition-interactive);
+}
+
+/* The header keeps its bottom rule only while the body is open, so a collapsed
+   panel reads as one solid chip rather than a lidded box. */
+.room-settings:not(.collapsed) .settings-toggle {
+  border-bottom: var(--edge-w) solid var(--edge);
 }
 
 .settings-toggle:hover {
-  background: rgba(255, 255, 255, 0.03);
+  background: #ffd469;
 }
 
 .toggle-icon {
-  font-size: 0.75rem;
-  color: var(--gold);
+  display: inline-flex;
+  color: var(--ink);
 }
 
 .toggle-hint {
   margin-left: auto;
-  font-size: 0.72rem;
-  font-weight: 400;
-  color: var(--chili-orange);
-  background: rgba(226, 99, 44, 0.12);
-  padding: 2px 8px;
+  font-size: 0.68rem;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--ink);
+  background: var(--chili);
+  border: 2px solid var(--edge);
+  padding: 2px 9px;
   border-radius: 100px;
 }
 
 .settings-body {
-  padding: 0 14px 12px;
+  padding: 4px 14px 14px;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 12px;
 }
 
 .setting-group {
-  border-top: 1px solid var(--line);
-  padding-top: 10px;
+  border-top: 2px solid rgba(27, 14, 6, 0.14);
+  padding-top: 12px;
 }
 
 .setting-group-split {
@@ -369,19 +381,20 @@ function closePreview() {
 }
 
 .setting-label {
-  font-size: 0.75rem;
-  font-weight: 600;
-  color: var(--gold);
-  margin-bottom: 6px;
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.72rem;
+  font-weight: 800;
+  color: var(--chili-deep);
+  margin-bottom: 8px;
   text-transform: uppercase;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.06em;
 }
 
 .setting-label-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 4px;
+  margin-bottom: 6px;
 }
 
 .setting-label-row .setting-label {
@@ -390,8 +403,8 @@ function closePreview() {
 
 .setting-sublabel {
   font-size: 0.78rem;
+  font-weight: 700;
   color: var(--mild-cream);
-  opacity: 0.7;
 }
 
 .setting-row {
@@ -401,18 +414,19 @@ function closePreview() {
 }
 
 .setting-hint {
-  font-size: 0.7rem;
-  color: var(--mild-cream);
-  opacity: 0.45;
-  margin-top: 4px;
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted-cream);
+  margin-top: 6px;
 }
 
 .stepper {
   display: flex;
   align-items: center;
   gap: 0;
-  border: 1px solid var(--line);
-  border-radius: 10px;
+  border: 2.5px solid var(--edge);
+  border-radius: var(--radius-sm);
+  background: var(--sand);
   overflow: hidden;
 }
 
@@ -421,75 +435,93 @@ function closePreview() {
 }
 
 .stepper-btn {
-  width: 34px;
-  height: 34px;
+  width: 44px;
+  height: 44px;
   border: none;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--steam-cream);
-  font-size: 1rem;
-  font-family: inherit;
+  background: var(--surface);
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 1.3rem;
+  font-weight: 800;
+  line-height: 1;
   cursor: pointer;
-  transition: background 0.15s ease;
+  transition: var(--transition-interactive);
 }
 
 .stepper-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--chili);
 }
 
 .stepper-btn:disabled {
-  opacity: 0.3;
+  background: var(--dim-fill);
+  color: var(--dim-text);
   cursor: default;
 }
 
 .stepper-val {
   flex: 1;
   text-align: center;
-  font-size: 0.85rem;
-  font-weight: 600;
-  color: var(--steam-cream);
-  min-width: 36px;
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.9rem;
+  font-weight: 800;
+  color: var(--ink);
+  min-width: 44px;
+  padding: 0 6px;
 }
 
 .deck-sizes {
   display: flex;
-  gap: 5px;
+  gap: 6px;
 }
 
 .deck-size-btn {
   flex: 1;
-  padding: 6px 0;
-  border-radius: 8px;
-  border: 1px solid var(--line);
-  background: rgba(255, 255, 255, 0.03);
-  color: var(--mild-cream);
-  font-size: 0.78rem;
-  font-weight: 600;
-  font-family: inherit;
+  min-width: 0;
+  padding: 10px 2px;
+  min-height: 44px;
+  border-radius: var(--radius-sm);
+  border: 2.5px solid var(--edge);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 800;
   cursor: pointer;
-  transition: all 0.15s ease;
+  transition: var(--transition-interactive);
 }
 
 .deck-size-btn:hover:not(:disabled) {
-  border-color: var(--chili-orange);
+  background: var(--sand);
 }
 
+/* Selected is a filled chip, not a tinted border — at this size a 2px colour
+   change is not a strong enough signal for which option is live. */
 .deck-size-btn.active {
-  background: rgba(226, 99, 44, 0.15);
-  border-color: var(--chili-orange);
-  color: var(--chili-orange);
+  background: var(--chili);
+  color: var(--ink);
+  box-shadow: inset 0 0 0 2px var(--surface);
 }
 
 .deck-size-btn:disabled {
-  opacity: 0.4;
+  background: var(--dim-fill);
+  border-color: var(--dim-edge);
+  color: var(--dim-text);
   cursor: default;
+}
+
+.deck-size-btn.active:disabled {
+  background: var(--chili);
+  border-color: var(--edge);
+  color: var(--ink);
 }
 
 .toggle-switch {
   position: relative;
   display: inline-block;
-  width: 40px;
-  height: 22px;
+  width: 56px;
+  height: 32px;
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 .toggle-switch input {
@@ -501,68 +533,68 @@ function closePreview() {
 .toggle-track {
   position: absolute;
   inset: 0;
-  background: rgba(255, 255, 255, 0.1);
+  background: var(--sand);
+  border: 2.5px solid var(--edge);
   border-radius: 100px;
-  transition: background 0.2s ease;
+  transition: background var(--duration-normal) ease;
 }
 
 .toggle-track::after {
   content: '';
   position: absolute;
-  width: 16px;
-  height: 16px;
+  width: 20px;
+  height: 20px;
   left: 3px;
-  bottom: 3px;
-  background: var(--mild-cream);
+  top: 3px;
+  background: var(--surface);
+  border: 2.5px solid var(--edge);
   border-radius: 50%;
-  transition: transform 0.2s ease;
+  transition: transform var(--duration-normal) var(--ease-out);
 }
 
 .toggle-switch input:checked + .toggle-track {
-  background: var(--chili-orange);
+  background: var(--mint);
 }
 
 .toggle-switch input:checked + .toggle-track::after {
-  transform: translateX(18px);
+  transform: translateX(24px);
 }
 
 .toggle-switch input:disabled + .toggle-track {
-  opacity: 0.4;
+  background: var(--dim-fill);
+  border-color: var(--dim-edge);
+}
+
+.toggle-switch input:focus-visible + .toggle-track {
+  outline: 3px solid var(--chili);
+  outline-offset: 3px;
 }
 
 .category-list {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
-  gap: 4px;
+  grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
+  gap: 6px;
 }
 
 .category-item {
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  border: 2.5px solid var(--edge);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
   overflow: hidden;
-  transition: border-color 0.15s ease;
-}
-
-.category-item:hover {
-  border-color: var(--chili-orange);
+  transition: var(--transition-interactive);
 }
 
 .category-item:has(.category-toggle input:checked) {
-  border-color: var(--chili-orange);
-  background: rgba(226, 99, 44, 0.05);
+  background: var(--mint);
 }
 
 .category-toggle {
   display: flex;
   align-items: center;
   gap: 6px;
-  padding: 6px 8px;
+  padding: 10px 8px;
+  min-height: 44px;
   cursor: pointer;
-  transition: background 0.15s ease;
-}
-
-.category-toggle:hover {
-  background: rgba(255, 255, 255, 0.02);
 }
 
 .category-toggle input {
@@ -570,121 +602,53 @@ function closePreview() {
 }
 
 .cat-icon {
-  font-size: 0.85rem;
+  display: inline-flex;
+  flex-shrink: 0;
+  color: var(--ink);
 }
 
 .cat-name {
-  font-size: 0.75rem;
-  color: var(--steam-cream);
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: var(--ink);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   flex: 1;
+  min-width: 0;
 }
 
 .cat-count {
-  font-size: 0.65rem;
-  color: var(--mild-cream);
-  opacity: 0.4;
-  font-weight: 600;
-}
-
-.cat-preview-btn {
-  width: 22px;
-  height: 22px;
-  border: none;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--mild-cream);
-  border-radius: 4px;
-  font-size: 0.65rem;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s ease;
   flex-shrink: 0;
+  font-size: 0.66rem;
+  font-weight: 800;
+  color: var(--ink);
+  background: rgba(27, 14, 6, 0.12);
+  border-radius: 100px;
+  padding: 1px 7px;
 }
 
-.cat-preview-btn:hover:not(:disabled) {
-  background: rgba(255, 255, 255, 0.1);
-}
-
-.cat-preview-btn:disabled {
-  opacity: 0.3;
-  cursor: default;
-}
-
-.category-preview {
-  padding: 8px 10px 10px;
-  border-top: 1px solid var(--line);
-  background: rgba(0, 0, 0, 0.15);
-}
-
-.preview-scroll {
-  display: flex;
-  gap: 6px;
-  overflow-x: auto;
-  padding-bottom: 4px;
-  scrollbar-width: thin;
-  scrollbar-color: var(--line) transparent;
-}
-
-.preview-scroll::-webkit-scrollbar {
-  height: 4px;
-}
-
-.preview-scroll::-webkit-scrollbar-track {
-  background: transparent;
-}
-
-.preview-scroll::-webkit-scrollbar-thumb {
-  background: var(--line);
-  border-radius: 4px;
-}
-
-.preview-card {
-  flex-shrink: 0;
-  width: 48px;
-  text-align: center;
-  cursor: pointer;
-  transition: transform 0.15s ease;
-}
-
-.preview-card:hover {
-  transform: translateY(-3px);
-}
-
-.preview-card img {
-  width: 48px;
-  height: 66px;
-  object-fit: cover;
-  border-radius: 4px;
-  border: 1px solid var(--line);
-  display: block;
-}
-
-.preview-card-name {
-  display: block;
-  font-size: 0.38rem;
-  color: var(--mild-cream);
-  opacity: 0.6;
-  margin-top: 3px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
+/* Locked settings wash out to tan — on a light ground a low opacity reads as
+   half-erased rather than unavailable. */
 .category-toggle:has(input:disabled) {
-  opacity: 0.4;
+  background: var(--dim-fill);
   cursor: default;
 }
 
-/* CARD PREVIEW LIGHTBOX */
+.category-toggle:has(input:disabled) .cat-name,
+.category-toggle:has(input:disabled) .cat-icon,
+.category-toggle:has(input:disabled) .cat-count {
+  color: var(--dim-text);
+}
+
+/* ─── Card preview lightbox ───
+   Teleported to <body>, so it relies on the theme living on <html>. */
+
 .card-lightbox {
   position: fixed;
   inset: 0;
   z-index: var(--z-lightbox);
-  background: rgba(21, 15, 12, 0.85);
+  background: rgba(27, 14, 6, 0.58);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -699,14 +663,15 @@ function closePreview() {
 
 .lightbox-card {
   position: relative;
-  background: var(--panel);
-  border: 1px solid var(--line);
-  border-radius: 16px;
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
   padding: 20px;
   text-align: center;
-  max-width: 220px;
+  max-width: 240px;
   width: 100%;
-  animation: lbPop 0.2s ease;
+  animation: lbPop 0.2s var(--ease-out-back);
 }
 
 @keyframes lbPop {
@@ -718,39 +683,45 @@ function closePreview() {
   width: 180px;
   height: 250px;
   object-fit: cover;
-  border-radius: 10px;
-  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  border: 2.5px solid var(--edge);
+  background: var(--sand);
   display: block;
   margin: 0 auto;
 }
 
 .lightbox-name {
   margin-top: 12px;
-  font-size: 0.9rem;
-  font-weight: 600;
-  color: var(--steam-cream);
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.95rem;
+  font-weight: 800;
+  color: var(--ink);
 }
 
 .lightbox-close {
   position: absolute;
-  top: 10px;
-  right: 10px;
-  width: 28px;
-  height: 28px;
+  top: -14px;
+  right: -14px;
+  width: 44px;
+  height: 44px;
   border-radius: 50%;
-  border: 1px solid var(--line);
-  background: rgba(21, 15, 12, 0.8);
-  color: var(--mild-cream);
-  font-size: 0.75rem;
+  border: var(--edge-w) solid var(--edge);
+  background: var(--broth);
+  color: var(--surface);
+  box-shadow: 0 3px 0 var(--edge);
   cursor: pointer;
   display: flex;
   align-items: center;
   justify-content: center;
-  transition: border-color 0.15s ease, color 0.15s ease;
+  transition: var(--transition-interactive);
 }
 
 .lightbox-close:hover {
-  border-color: var(--broth-red);
-  color: var(--broth-red);
+  background: #b81f1f;
+}
+
+.lightbox-close:active {
+  transform: translateY(2px);
+  box-shadow: 0 1px 0 var(--edge);
 }
 </style>

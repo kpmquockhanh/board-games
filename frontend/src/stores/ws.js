@@ -1,12 +1,17 @@
 import { defineStore } from 'pinia'
+import { getSessionId } from '../session'
 
 function getWsUrl(room, player) {
+  // The session id travels with the socket so the server can recognise the one
+  // this tab left open before a reload and drop it, instead of reading it as a
+  // second player on the seat.
+  const query = `room=${encodeURIComponent(room)}&player=${encodeURIComponent(player)}&session=${encodeURIComponent(getSessionId())}`
   const env = import.meta.env.VITE_WS_URL
   if (env) {
-    return `${env}/ws?room=${encodeURIComponent(room)}&player=${encodeURIComponent(player)}`
+    return `${env}/ws?${query}`
   }
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-  return `${proto}//${location.host}/ws?room=${encodeURIComponent(room)}&player=${encodeURIComponent(player)}`
+  return `${proto}//${location.host}/ws?${query}`
 }
 
 export const useWsStore = defineStore('ws', {
@@ -21,6 +26,7 @@ export const useWsStore = defineStore('ws', {
       this.room = room
       this.player = player
       if (!this._handlers) this._handlers = []
+      if (!this._openHandlers) this._openHandlers = []
 
       if (this._ws) {
         this._ws.onopen = null
@@ -35,8 +41,11 @@ export const useWsStore = defineStore('ws', {
       this._ws = socket
 
       socket.onopen = () => {
+        const reopened = this._everConnected === true
+        this._everConnected = true
         this.connected = true
         this._reconnectDelay = 1000
+        this._openHandlers.forEach((h) => h(reopened))
       }
 
       socket.onmessage = (event) => {
@@ -74,6 +83,16 @@ export const useWsStore = defineStore('ws', {
       }
     },
 
+    // Called on every open. The argument is true when the socket had been
+    // connected before, i.e. this is a reconnect and state may have been missed.
+    onOpen(handler) {
+      if (!this._openHandlers) this._openHandlers = []
+      this._openHandlers.push(handler)
+      return () => {
+        this._openHandlers = this._openHandlers.filter((h) => h !== handler)
+      }
+    },
+
     disconnect() {
       this._intentionalClose = true
       if (this._reconnectTimer) {
@@ -86,6 +105,7 @@ export const useWsStore = defineStore('ws', {
         this._ws = null
       }
       this.connected = false
+      this._everConnected = false
       this._intentionalClose = false
     },
 

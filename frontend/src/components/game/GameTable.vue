@@ -1,86 +1,159 @@
 <template>
   <div class="table-zone" ref="tableZone">
-    <div class="table-surface">
+    <!-- Opponents sit on a wrapping rail above the table and the local player
+         sits below it. The seats used to be absolutely positioned around an
+         ellipse whose radius was derived from the zone width alone, which
+         ignored the seat's own width — at phone widths the left and right
+         avatars ended up underneath the centred table. Flow layout makes that
+         overlap structurally impossible, so there are no magic offsets to
+         keep in sync with the table size. -->
+    <div class="seat-rail" v-if="opponents.length">
       <div
-        class="draw-pile"
-        :class="{ 'pile-shake': pileAnimating }"
-        role="button"
-        tabindex="0"
-        @click="$emit('drawCard')"
-        @keydown.enter="$emit('drawCard')"
-        @keydown.space.prevent="$emit('drawCard')"
+        v-for="name in opponents"
+        :key="name"
+        class="player-seat"
+        :data-testid="'player-seat-' + name"
+        :data-alive="store.gameState?.players[name]?.alive"
+        :class="{
+          'active-turn': store.gameState?.turn === name,
+          eliminated: !store.gameState?.players[name]?.alive,
+          offline: store.isOffline(name)
+        }"
       >
-        <div class="draw-card">
-          <div class="draw-card-inner">
-            <span class="draw-icon">🔥</span>
-            <span class="draw-label">DRAW</span>
+        <div class="avatar-wrapper">
+          <div
+            class="avatar"
+            :style="{
+              background: store.gameState?.players[name]?.color,
+              color: readableInk(store.gameState?.players[name]?.color),
+            }"
+            :aria-label="`${name}${!store.gameState?.players[name]?.alive ? ' (eliminated)' : ''}`"
+          >{{ name.trim().slice(0, 2).toUpperCase() }}</div>
+          <div class="card-count-badge" :data-testid="'hand-count-' + name">
+            {{ store.gameState?.players[name]?.handCount || 0 }}
           </div>
         </div>
-        <div class="deck-count">
-          <span class="deck-count-num">{{ store.drawPileCount }}</span>
-          <span class="deck-count-label">left</span>
+        <div class="player-name">
+          {{ name }}
+          <span v-if="store.isOffline(name)" class="offline-tag">offline</span>
+        </div>
+        <div v-if="store.gameState?.turn === name" class="turn-indicator" data-testid="turn-indicator">Turn</div>
+      </div>
+    </div>
+
+    <div class="table-band">
+      <div class="table-surface">
+        <div
+          class="draw-pile"
+          data-testid="draw-pile"
+          role="button"
+          tabindex="0"
+          @click="$emit('drawCard')"
+          @keydown.enter="$emit('drawCard')"
+          @keydown.space.prevent="$emit('drawCard')"
+        >
+          <div class="draw-card" :class="{ 'pile-shake': pileAnimating }" ref="drawCardEl">
+            <div class="draw-card-inner">
+              <Flame class="draw-icon" :size="30" aria-hidden="true" />
+              <span class="draw-label">DRAW</span>
+            </div>
+          </div>
+          <div class="deck-count">
+            <span class="deck-count-num" data-testid="deck-count">{{ store.drawPileCount }}</span>
+            <span class="deck-count-label">left</span>
+          </div>
+        </div>
+
+        <div v-if="store.recentlyPlayed.length > 0" class="discard-zone">
+          <div class="discard-label">DISCARD</div>
+          <div class="discard-stack">
+            <div
+              v-for="(entry, i) in store.recentlyPlayed.slice(0, 3).reverse()"
+              :key="entry.key"
+              class="discard-card"
+              :style="{ '--i': i }"
+            >
+              <img :src="`/cards/${entry.card.file}`" :alt="entry.card.name" loading="lazy">
+            </div>
+          </div>
         </div>
       </div>
 
-      <div v-if="store.recentlyPlayed.length > 0" class="discard-zone">
-        <div class="discard-label">DISCARD</div>
-        <div class="discard-stack">
-          <div
-            v-for="(card, i) in store.recentlyPlayed.slice(0, 3).reverse()"
-            :key="i"
-            class="discard-card"
-            :style="{ '--i': i }"
-          >
-            <img :src="`/cards/${card.file}`" :alt="card.name" loading="lazy">
-          </div>
-        </div>
+      <div
+        v-if="store.turnTimeLeft > 0"
+        class="turn-timer"
+        :class="{ urgent: store.turnTimeLeft <= 5 }"
+        role="timer"
+        aria-live="off"
+      >
+        <Timer :size="13" />
+        <span>{{ store.turnTimeLeft }}s</span>
       </div>
 
       <div v-if="store.attackStackCount > 0" class="attack-indicator" role="status" aria-live="polite">
         <Zap class="attack-icon" :size="14" />
-        <span class="attack-count">{{ store.attackStackCount }} forced draw{{ store.attackStackCount > 1 ? 's' : '' }}</span>
+        <span class="attack-count" data-testid="attack-count">{{ store.attackStackCount }} forced draw{{ store.attackStackCount > 1 ? 's' : '' }}</span>
       </div>
     </div>
 
-    <div
-      v-for="name in store.turnOrder"
-      :key="name"
-      class="player-seat"
-      :class="{
-        'active-turn': store.gameState?.turn === name,
-        eliminated: !store.gameState?.players[name]?.alive,
-        'is-me': store.me && name === store.me.name
-      }"
-      :style="seatStyle(name)"
-    >
-      <div class="avatar-wrapper">
-        <div
-          class="avatar"
-          :style="{ background: store.gameState?.players[name]?.color }"
-          :aria-label="`${name}${!store.gameState?.players[name]?.alive ? ' (eliminated)' : ''}`"
-        >{{ name.trim().slice(0, 2).toUpperCase() }}</div>
-        <div class="card-count-badge">
-          {{ store.gameState?.players[name]?.hand?.length || 0 }}
+    <!-- Iterated over a 0-or-1 array rather than written out under a v-if, so
+         the local player's seat is the same markup as everyone else's. -->
+    <div class="seat-rail mine" v-if="mySeat.length">
+      <div
+        v-for="name in mySeat"
+        :key="name"
+        class="player-seat is-me"
+        :data-testid="'player-seat-' + name"
+        :data-alive="store.gameState?.players[name]?.alive"
+        :class="{
+          'active-turn': store.gameState?.turn === name,
+          eliminated: !store.gameState?.players[name]?.alive,
+          offline: store.isOffline(name)
+        }"
+      >
+        <div class="avatar-wrapper">
+          <div
+            class="avatar"
+            :style="{
+              background: store.gameState?.players[name]?.color,
+              color: readableInk(store.gameState?.players[name]?.color),
+            }"
+            :aria-label="`${name}${!store.gameState?.players[name]?.alive ? ' (eliminated)' : ''}`"
+          >{{ name.trim().slice(0, 2).toUpperCase() }}</div>
+          <div class="card-count-badge" :data-testid="'hand-count-' + name">
+            {{ store.gameState?.players[name]?.handCount || 0 }}
+          </div>
         </div>
+        <div class="player-name">
+          {{ name }} (you)
+          <span v-if="store.isOffline(name)" class="offline-tag">offline</span>
+        </div>
+        <div v-if="store.gameState?.turn === name" class="turn-indicator mine" data-testid="turn-indicator">Your turn</div>
       </div>
-      <div class="player-name">
-        {{ name }}{{ store.me && name === store.me.name ? ' (you)' : '' }}
-      </div>
-      <div v-if="store.gameState?.turn === name" class="turn-indicator">Turn</div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, watch } from 'vue'
-import { Zap } from '@lucide/vue'
+import { ref, computed, watch } from 'vue'
+import { Zap, Timer, Flame } from '@lucide/vue'
 import { useEkStore } from '../../stores/explodingKitchen'
+import { readableInk } from '../../utils/contrast'
 
 const store = useEkStore()
 const tableZone = ref(null)
+const drawCardEl = ref(null)
 const pileAnimating = ref(false)
 
-let lastDrawCount = 0
+const mySeat = computed(() => {
+  const me = store.me?.name
+  return me && store.turnOrder.includes(me) ? [me] : []
+})
+
+const opponents = computed(() =>
+  store.turnOrder.filter((name) => name !== store.me?.name)
+)
+
 watch(
   () => store.drawPileCount,
   (newCount, oldCount) => {
@@ -88,27 +161,13 @@ watch(
       pileAnimating.value = true
       setTimeout(() => { pileAnimating.value = false }, 400)
     }
-    lastDrawCount = newCount
   }
 )
 
-function seatStyle(name) {
-  if (!tableZone.value) return {}
-  const zone = tableZone.value
-  const names = store.turnOrder
-  const idx = names.indexOf(name)
-  const cx = zone.clientWidth / 2
-  const cy = zone.clientHeight / 2
-  const rx = zone.clientWidth * 0.38
-  const ry = zone.clientHeight * 0.38
-  const angle = (idx / names.length) * Math.PI * 2 - Math.PI / 2
-  return {
-    left: (cx + Math.cos(angle) * rx) + 'px',
-    top: (cy + Math.sin(angle) * ry) + 'px',
-  }
-}
-
-defineExpose({ tableZone })
+defineExpose({
+  tableZone,
+  getDeckRect: () => drawCardEl.value?.getBoundingClientRect() || null,
+})
 defineEmits(['drawCard'])
 </script>
 
@@ -117,27 +176,47 @@ defineEmits(['drawCard'])
   position: relative;
   flex: 1;
   min-height: 340px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 10px;
+  padding: 10px 12px;
   overflow: visible;
 }
 
+.seat-rail {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  align-items: flex-start;
+  gap: 8px 14px;
+  flex-shrink: 0;
+}
+
+.table-band {
+  position: relative;
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  min-height: 0;
+}
+
 .table-surface {
-  position: absolute;
-  left: 50%;
-  top: 50%;
-  transform: translate(-50%, -50%);
   width: 320px;
-  height: 200px;
-  background: linear-gradient(145deg, #5c3d2e, #3e2518 60%, #2e1a10);
-  border-radius: 24px;
-  border: 2px solid rgba(139, 90, 43, 0.4);
-  box-shadow:
-    0 8px 32px rgba(0, 0, 0, 0.5),
-    inset 0 1px 0 rgba(255, 255, 255, 0.06),
-    inset 0 -2px 8px rgba(0, 0, 0, 0.3);
+  max-width: 100%;
+  min-height: 190px;
+  background: var(--table);
+  border-radius: var(--radius-lg);
+  border: var(--edge-w) solid var(--edge);
+  box-shadow: var(--lift-lg);
   display: flex;
   align-items: center;
   justify-content: center;
-  gap: 40px;
+  gap: 28px;
+  padding: 14px;
 }
 
 .draw-pile {
@@ -146,56 +225,61 @@ defineEmits(['drawCard'])
   align-items: center;
   gap: 6px;
   cursor: pointer;
-  transition: transform 0.1s ease;
-}
-
-.draw-pile:hover {
-  transform: scale(1.04);
+  border-radius: var(--radius-sm);
+  transition: transform var(--duration-fast) var(--ease-out);
 }
 
 .draw-pile:hover .draw-card {
-  box-shadow: 0 4px 24px rgba(226, 99, 44, 0.5);
-  border-color: rgba(255, 255, 255, 0.3);
+  transform: translateY(-3px);
+  box-shadow: 0 8px 0 var(--edge);
+}
+
+.draw-pile:active .draw-card {
+  transform: translateY(3px);
+  box-shadow: 0 1px 0 var(--edge);
 }
 
 .draw-pile:focus-visible {
-  outline: 2px solid var(--chili-orange);
+  outline: 3px solid var(--chili);
   outline-offset: 4px;
-  border-radius: 10px;
 }
 
-.draw-pile.pile-shake {
+.draw-card.pile-shake {
   animation: pileShake 0.4s ease;
 }
 
 @keyframes pileShake {
   0%, 100% { transform: translateX(0); }
-  20% { transform: translateX(-3px) rotate(-1deg); }
-  40% { transform: translateX(3px) rotate(1deg); }
-  60% { transform: translateX(-2px) rotate(-0.5deg); }
-  80% { transform: translateX(2px) rotate(0.5deg); }
+  20% { transform: translateX(-3px) rotate(-1.5deg); }
+  40% { transform: translateX(3px) rotate(1.5deg); }
+  60% { transform: translateX(-2px) rotate(-0.8deg); }
+  80% { transform: translateX(2px) rotate(0.8deg); }
 }
 
 .draw-card {
   width: 80px;
   height: 112px;
-  border-radius: 10px;
-  background: linear-gradient(145deg, #e2632c, #c44d1c);
-  border: 2px solid rgba(255, 255, 255, 0.15);
-  box-shadow: 0 4px 16px rgba(226, 99, 44, 0.3);
+  border-radius: var(--radius-sm);
+  background: var(--chili);
+  border: var(--edge-w) solid var(--edge);
+  box-shadow: 0 5px 0 var(--edge);
+  color: var(--ink);
   display: flex;
   align-items: center;
   justify-content: center;
   position: relative;
   overflow: hidden;
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out);
 }
 
+/* A faint check keeps the flat fill from looking like an unloaded image. */
 .draw-card::before {
   content: '';
   position: absolute;
   inset: 0;
-  background: repeating-conic-gradient(rgba(255,255,255,0.04) 0% 25%, transparent 0% 50%) 50%/14px 14px;
-  border-radius: 8px;
+  background: repeating-conic-gradient(rgba(27, 14, 6, 0.07) 0% 25%, transparent 0% 50%) 50%/14px 14px;
 }
 
 .draw-card-inner {
@@ -208,34 +292,37 @@ defineEmits(['drawCard'])
 }
 
 .draw-icon {
-  font-size: 1.8rem;
-  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.3));
+  flex-shrink: 0;
 }
 
 .draw-label {
   font-family: 'Baloo 2', sans-serif;
   font-weight: 800;
   font-size: 0.9rem;
-  color: white;
+  color: var(--ink);
   letter-spacing: 0.1em;
-  text-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
 
 .deck-count {
   display: flex;
   align-items: baseline;
   gap: 4px;
+  padding: 2px 10px;
+  border-radius: 100px;
+  border: 2px solid var(--edge);
+  background: var(--surface);
   font-family: 'Baloo 2', sans-serif;
 }
 
 .deck-count-num {
   font-size: 1rem;
-  font-weight: 700;
-  color: var(--steam-cream);
+  font-weight: 800;
+  color: var(--ink);
 }
 
 .deck-count-label {
   font-size: 0.7rem;
+  font-weight: 700;
   color: var(--muted-cream);
 }
 
@@ -247,11 +334,16 @@ defineEmits(['drawCard'])
 }
 
 .discard-label {
+  padding: 2px 9px;
+  border-radius: 100px;
+  border: 2px solid var(--edge);
+  background: var(--surface);
+  font-family: 'Baloo 2', sans-serif;
   font-size: 0.6rem;
   text-transform: uppercase;
   letter-spacing: 0.1em;
-  color: var(--muted-cream);
-  font-weight: 600;
+  color: var(--ink);
+  font-weight: 800;
 }
 
 .discard-stack {
@@ -264,17 +356,16 @@ defineEmits(['drawCard'])
   position: absolute;
   width: 70px;
   height: 98px;
-  border-radius: 8px;
-  border: 2px solid var(--line);
-  background: var(--charcoal);
+  border-radius: 10px;
+  border: 2.5px solid var(--edge);
+  background: var(--surface);
   overflow: hidden;
   transition: transform var(--duration-normal) ease;
   transform: rotate(calc(var(--i) * -4deg)) translateY(calc(var(--i) * 6px));
 }
 
 .discard-card:first-child {
-  border-color: rgba(253, 243, 228, 0.25);
-  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.3);
+  box-shadow: 0 3px 0 var(--edge);
 }
 
 .discard-card img {
@@ -289,20 +380,18 @@ defineEmits(['drawCard'])
 }
 
 .attack-indicator {
-  position: absolute;
-  bottom: -36px;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 6px;
-  font-size: 0.8rem;
-  padding: 6px 14px;
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.82rem;
+  font-weight: 800;
+  padding: 5px 14px;
   border-radius: 100px;
-  background: linear-gradient(135deg, rgba(183, 41, 31, 0.3), rgba(226, 99, 44, 0.15));
-  color: var(--broth-red);
-  border: 1px solid rgba(183, 41, 31, 0.45);
-  font-weight: 600;
+  background: var(--broth);
+  color: var(--surface);
+  border: 2.5px solid var(--edge);
+  box-shadow: 0 3px 0 var(--edge);
   white-space: nowrap;
   animation: attack-pulse 2s ease-in-out infinite;
 }
@@ -312,22 +401,45 @@ defineEmits(['drawCard'])
 }
 
 @keyframes attack-pulse {
-  0%, 100% { opacity: 1; }
-  50% { opacity: 0.8; }
+  0%, 100% { transform: rotate(-1.5deg); }
+  50% { transform: rotate(1.5deg); }
 }
 
+.turn-timer {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 12px;
+  border-radius: 100px;
+  border: 2.5px solid var(--edge);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: 'Baloo 2', sans-serif;
+  font-size: 0.8rem;
+  font-weight: 800;
+  font-variant-numeric: tabular-nums;
+}
+
+.turn-timer.urgent {
+  background: var(--broth);
+  color: var(--surface);
+}
+
+/* ─── Seats ─── */
+
 .player-seat {
-  position: absolute;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  width: 92px;
   text-align: center;
-  transform: translate(-50%, -50%);
-  transition: all 0.3s ease;
-  z-index: 10;
+  transition: opacity var(--duration-slow) ease;
 }
 
 .avatar-wrapper {
   position: relative;
   display: inline-block;
-  margin-bottom: 4px;
 }
 
 .avatar {
@@ -338,38 +450,45 @@ defineEmits(['drawCard'])
   align-items: center;
   justify-content: center;
   font-family: 'Baloo 2', sans-serif;
-  font-weight: 700;
-  font-size: 1rem;
-  color: #1c1512;
-  box-shadow: 0 4px 14px -4px rgba(0, 0, 0, 0.6);
-  border: 2.5px solid rgba(253, 243, 228, 0.35);
-  transition: box-shadow 0.2s ease;
+  font-weight: 800;
+  font-size: 1.2rem;
+  color: var(--ink);
+  border: 3px solid var(--edge);
+  box-shadow: 0 3px 0 var(--edge);
+  transition:
+    box-shadow var(--duration-normal) ease,
+    filter var(--duration-slow) ease;
 }
 
 .player-seat.is-me .avatar {
-  border-color: var(--gold);
-  box-shadow: 0 0 0 2px var(--gold), 0 4px 14px -4px rgba(0, 0, 0, 0.6);
+  box-shadow: 0 0 0 4px var(--gold), 0 3px 0 var(--edge);
 }
 
+/* Greying out by opacity is unreadable on a light ground, so an eliminated
+   chef desaturates onto the tan instead. */
 .player-seat.eliminated .avatar {
-  opacity: 0.3;
-  filter: grayscale(1);
+  filter: grayscale(1) brightness(1.08);
+}
+
+.player-seat.eliminated .player-name {
+  color: var(--dim-text);
+  text-decoration: line-through;
 }
 
 .card-count-badge {
   position: absolute;
   bottom: -4px;
-  right: -4px;
-  min-width: 22px;
-  height: 22px;
+  right: -6px;
+  min-width: 24px;
+  height: 24px;
   padding: 0 5px;
   border-radius: 100px;
-  background: var(--charcoal);
-  border: 2px solid var(--line);
-  color: var(--steam-cream);
+  background: var(--surface);
+  border: 2.5px solid var(--edge);
+  color: var(--ink);
   font-family: 'Baloo 2', sans-serif;
-  font-size: 0.7rem;
-  font-weight: 700;
+  font-size: 0.72rem;
+  font-weight: 800;
   display: flex;
   align-items: center;
   justify-content: center;
@@ -377,89 +496,186 @@ defineEmits(['drawCard'])
 }
 
 .player-seat.active-turn .avatar {
-  border-color: var(--chili-orange);
-  box-shadow: 0 0 0 2px var(--chili-orange), 0 0 20px rgba(226, 99, 44, 0.4);
+  box-shadow: 0 0 0 4px var(--chili), 0 3px 0 var(--edge);
 }
 
 .player-name {
-  font-size: 0.72rem;
+  font-size: 0.74rem;
+  font-weight: 800;
   color: var(--mild-cream);
-  opacity: 0.9;
   white-space: nowrap;
-  max-width: 90px;
+  max-width: 92px;
   overflow: hidden;
   text-overflow: ellipsis;
 }
 
 .turn-indicator {
   display: inline-block;
-  margin-top: 2px;
+  font-family: 'Baloo 2', sans-serif;
   font-size: 0.6rem;
-  font-weight: 700;
+  font-weight: 800;
   text-transform: uppercase;
   letter-spacing: 0.08em;
-  color: var(--chili-orange);
-  background: rgba(226, 99, 44, 0.15);
-  padding: 2px 8px;
+  color: var(--ink);
+  background: var(--chili);
+  padding: 2px 9px;
   border-radius: 100px;
-  border: 1px solid rgba(226, 99, 44, 0.3);
+  border: 2px solid var(--edge);
+}
+
+.turn-indicator.mine {
+  background: var(--gold);
+}
+
+.player-seat.offline .avatar {
+  filter: grayscale(0.7);
+}
+
+.offline-tag {
+  margin-left: 3px;
+  font-size: 0.6rem;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--muted-cream);
 }
 
 @media (max-width: 640px) {
   .table-zone {
     min-height: 280px;
+    padding: 8px;
+    gap: 8px;
+  }
+
+  .seat-rail {
+    gap: 6px 10px;
   }
 
   .table-surface {
-    width: 240px;
-    height: 160px;
-    border-radius: 18px;
-    gap: 24px;
+    width: 100%;
+    max-width: 300px;
+    min-height: 150px;
+    gap: 18px;
+    padding: 12px;
   }
 
   .draw-card {
-    width: 60px;
-    height: 84px;
-  }
-
-  .draw-icon {
-    font-size: 1.4rem;
+    width: 62px;
+    height: 87px;
   }
 
   .draw-label {
-    font-size: 0.7rem;
+    font-size: 0.72rem;
   }
 
-  .discard-card {
-    width: 52px;
-    height: 73px;
-  }
-
+  .discard-card,
   .discard-stack {
-    width: 52px;
-    height: 73px;
+    width: 54px;
+    height: 76px;
+  }
+
+  .player-seat {
+    width: 72px;
   }
 
   .avatar {
-    width: 38px;
-    height: 38px;
-    font-size: 0.8rem;
+    width: 40px;
+    height: 40px;
+    font-size: 0.82rem;
   }
 
   .card-count-badge {
-    min-width: 18px;
-    height: 18px;
-    font-size: 0.6rem;
-    border-width: 1.5px;
+    min-width: 20px;
+    height: 20px;
+    font-size: 0.62rem;
+    border-width: 2px;
   }
 
   .player-name {
-    font-size: 0.6rem;
+    font-size: 0.62rem;
+    max-width: 72px;
   }
 
   .turn-indicator {
-    font-size: 0.5rem;
-    padding: 1px 6px;
+    font-size: 0.52rem;
+    padding: 1px 7px;
+  }
+}
+
+/* ─── Desktop ───
+   Everything above was sized for a phone and then centred on bigger screens,
+   which left the table and seats looking like a postage stamp. These tiers
+   scale the whole cluster with the viewport so it fills the room it has. */
+
+@media (min-width: 900px) {
+  .table-zone {
+    gap: 20px;
+    padding: 20px 24px;
+  }
+
+  .seat-rail {
+    gap: 14px 28px;
+  }
+
+  .table-surface {
+    width: 420px;
+    min-height: 240px;
+    gap: 36px;
+    padding: 20px;
+  }
+
+  .draw-card {
+    width: 104px;
+    height: 146px;
+  }
+
+  .draw-label {
+    font-size: 1.05rem;
+  }
+
+  .discard-card,
+  .discard-stack {
+    width: 94px;
+    height: 132px;
+  }
+
+  .player-seat {
+    width: 120px;
+  }
+
+  .avatar {
+    width: 60px;
+    height: 60px;
+    font-size: 1.5rem;
+  }
+
+  .player-name {
+    font-size: 0.85rem;
+    max-width: 120px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .table-surface {
+    width: 480px;
+    min-height: 280px;
+    gap: 44px;
+  }
+
+  .draw-card {
+    width: 120px;
+    height: 168px;
+  }
+
+  .discard-card,
+  .discard-stack {
+    width: 108px;
+    height: 152px;
+  }
+
+  .avatar {
+    width: 68px;
+    height: 68px;
+    font-size: 1.7rem;
   }
 }
 </style>

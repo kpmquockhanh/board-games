@@ -27,9 +27,24 @@
   /* Animation tokens */
   --ease-standard: 0.15s ease;
   --ease-bounce: 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+  /* Curve-only, so they can be paired with any duration — unlike the two
+     above, which bundle a duration in and cannot be reused. */
+  --ease-out: cubic-bezier(0.22, 0.61, 0.36, 1);
+  --ease-out-back: cubic-bezier(0.22, 1.2, 0.36, 1);
   --duration-fast: 0.15s;
   --duration-normal: 0.2s;
   --duration-slow: 0.3s;
+
+  /* Hover and press states only ever change paint properties, so this stands
+     in for `transition: all` without ever animating layout. */
+  --transition-interactive:
+    background-color var(--duration-fast) ease,
+    border-color var(--duration-fast) ease,
+    color var(--duration-fast) ease,
+    box-shadow var(--duration-fast) ease,
+    opacity var(--duration-fast) ease,
+    filter var(--duration-fast) ease,
+    transform var(--duration-fast) ease;
 
   /* Spacing scale */
   --space-xs: 4px;
@@ -173,6 +188,46 @@ input {
   opacity: 1;
 }
 
+/* ─── Modal & Overlay Transitions ─── */
+
+/*
+ * Applied by `<Transition name="modal">` wrapped around a full-screen backdrop
+ * whose single child is the dialog card. `> *` reaches that card whether it is
+ * called .modal-card, .peek-card or .result-card, so every dialog in the game
+ * shares one entrance without each one restating it.
+ *
+ * Asymmetric on purpose: opening is the moment worth presenting, closing
+ * should get out of the way.
+ */
+.modal-enter-active {
+  transition: opacity var(--duration-normal) var(--ease-out);
+}
+
+.modal-leave-active {
+  transition: opacity var(--duration-fast) ease-in;
+}
+
+.modal-enter-from,
+.modal-leave-to {
+  opacity: 0;
+}
+
+.modal-enter-active > * {
+  transition: transform 0.26s var(--ease-out-back);
+}
+
+.modal-leave-active > * {
+  transition: transform var(--duration-fast) ease-in;
+}
+
+.modal-enter-from > * {
+  transform: scale(0.94) translateY(10px);
+}
+
+.modal-leave-to > * {
+  transform: scale(0.97);
+}
+
 /* ─── Reduced Motion ─── */
 
 @media (prefers-reduced-motion: reduce) {
@@ -184,4 +239,195 @@ input {
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
   }
+}
+
+/* ═══════════════════════════════════════════════════════════════════
+   Kitchen theme — the cartoon direction for Exploding Kitchen
+   ═══════════════════════════════════════════════════════════════════
+
+   EkView toggles `theme-kitchen` on <html> while the route is mounted, so
+   the tokens reach teleported nodes (RoomSettings' modal, DrawFlight) that
+   render outside the view's own subtree. Hub and Hotpot keep the dark
+   palette above untouched.
+
+   The look is neubrutalist — ink outlines, flat saturated fills, hard
+   blurless offset shadows — with the chunky rounding of clay so it reads as
+   a cartoon rather than a poster. Every surface that can be pressed carries
+   the shadow and drops into it on :active, so depth is the affordance.
+*/
+
+html.theme-kitchen {
+  /* Ground and surfaces */
+  --ink: #1b0e06;
+  --paper: #ffe8c2;
+  --table: #e9a867;
+  --surface: #fffdf6;
+  --sand: #f6e3c0;
+
+  /* Accents. Chili and gold are too light to carry white text (2.9:1 and
+     1.5:1), so those two take ink; broth red at 4.9:1 is the one bright fill
+     that takes cream. */
+  --chili: #ff5a2b;
+  --chili-deep: #c4431b;
+  --mint: #2ecc8f;
+  --broth: #d62828;
+  --blueberry: #3e7bfa;
+  --grape: #8b5cf6;
+  --cat: #a16207;
+
+  /* Card families — eight buckets covering all 21 card categories. Colour is
+     never the only channel; each family also carries its own icon. */
+  --family-attack: var(--broth);
+  --family-defend: var(--mint);
+  --family-evade: var(--blueberry);
+  --family-peek: var(--grape);
+  --family-steal: var(--gold);
+  --family-chaos: var(--chili);
+  --family-nope: #4a3726;
+  --family-cat: var(--cat);
+
+  /* Outlines and press depth */
+  --edge: var(--ink);
+  --edge-w: 3px;
+  --lift: 0 4px 0 var(--edge);
+  --lift-lg: 0 6px 0 var(--edge);
+  --radius-sm: 12px;
+  --radius-md: 18px;
+  --radius-lg: 26px;
+
+  /* Disabled and eliminated read as washed-out tan rather than low opacity,
+     which is unreadable against a light ground. */
+  --dim-fill: #dcc7a4;
+  --dim-edge: #9a8060;
+  --dim-text: #6b573c;
+
+  /* ── Legacy token remap ──
+     The components below still reference the original token names. Each name
+     had exactly one role across the codebase (charcoal: inset wells, panel:
+     panel fills, steam-cream: primary text, mild-cream: secondary text,
+     muted-cream: tertiary text, line: hairline dividers), so re-pointing the
+     values here flips the whole surface without touching 390 call sites. */
+  --charcoal: var(--sand);
+  --panel: var(--surface);
+  --steam-cream: var(--ink);
+  --mild-cream: #3a2a1c;
+  --muted-cream: #7a5c3a;
+  --faint-cream: #5c452c;
+  --line: rgba(27, 14, 6, 0.18);
+  --gold: #ffc53d;
+  --chili-orange: var(--chili);
+  --broth-red: var(--broth);
+}
+
+html.theme-kitchen body {
+  background: var(--paper);
+  color: var(--ink);
+  font-family: 'Nunito', sans-serif;
+  font-weight: 600;
+}
+
+html.theme-kitchen button,
+html.theme-kitchen input,
+html.theme-kitchen select,
+html.theme-kitchen textarea {
+  font-family: 'Nunito', sans-serif;
+}
+
+/* Gold is invisible as a ring against a buttery ground, so focus moves to
+   chili — which also never appears as a focus-adjacent fill. */
+html.theme-kitchen :focus-visible {
+  outline: 3px solid var(--chili);
+  outline-offset: 3px;
+}
+
+/* ─── Kitchen buttons ─── */
+
+html.theme-kitchen .btn {
+  background: var(--chili);
+  color: var(--ink);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-md);
+  box-shadow: var(--lift);
+  font-family: 'Baloo 2', sans-serif;
+  font-weight: 800;
+  font-size: 1.05rem;
+  min-height: 52px;
+  transition:
+    transform var(--duration-fast) var(--ease-out),
+    box-shadow var(--duration-fast) var(--ease-out),
+    background-color var(--duration-fast) ease;
+}
+
+html.theme-kitchen .btn:hover:not(:disabled) {
+  transform: translateY(-2px);
+  box-shadow: 0 6px 0 var(--edge);
+}
+
+html.theme-kitchen .btn:active:not(:disabled) {
+  transform: translateY(4px);
+  box-shadow: 0 1px 0 var(--edge);
+}
+
+html.theme-kitchen .btn:disabled {
+  opacity: 1;
+  background: var(--dim-fill);
+  border-color: var(--dim-edge);
+  color: var(--dim-text);
+  box-shadow: 0 4px 0 var(--dim-edge);
+}
+
+html.theme-kitchen .btn-secondary {
+  background: var(--surface);
+  color: var(--ink);
+  border-color: var(--edge);
+}
+
+html.theme-kitchen .btn-secondary:hover:not(:disabled) {
+  background: var(--sand);
+}
+
+html.theme-kitchen .btn-danger {
+  background: var(--broth);
+  color: var(--surface);
+  border-color: var(--edge);
+}
+
+html.theme-kitchen .btn-danger:hover:not(:disabled) {
+  background: #b81f1f;
+  color: var(--surface);
+}
+
+html.theme-kitchen .btn-link {
+  background: none;
+  border: none;
+  box-shadow: none;
+  min-height: 44px;
+  color: var(--chili-deep);
+  font-family: 'Nunito', sans-serif;
+  font-weight: 800;
+}
+
+html.theme-kitchen .btn-link:hover {
+  opacity: 1;
+  color: var(--broth);
+}
+
+/* ─── Kitchen panels and links ─── */
+
+html.theme-kitchen .panel {
+  background: var(--surface);
+  border: var(--edge-w) solid var(--edge);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--lift-lg);
+}
+
+html.theme-kitchen .back-link {
+  min-height: 44px;
+  opacity: 1;
+  color: var(--muted-cream);
+  font-weight: 800;
+}
+
+html.theme-kitchen .back-link:hover {
+  color: var(--ink);
 }

@@ -5,6 +5,7 @@ import (
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
 
 	"ping/game"
@@ -31,6 +32,9 @@ type Handler struct {
 	ekStates   map[string]*game.EKGameState
 	ekMu       map[string]*sync.Mutex
 	ekMuGlobal sync.Mutex
+	// presence counts arrivals on each seat. See arrive.
+	presence   map[string]uint64
+	presenceMu sync.Mutex
 }
 
 func NewHandler(store storage.Store, hub *ws.Hub) *Handler {
@@ -39,6 +43,84 @@ func NewHandler(store storage.Store, hub *ws.Hub) *Handler {
 		hub:      hub,
 		ekStates: make(map[string]*game.EKGameState),
 		ekMu:     make(map[string]*sync.Mutex),
+		presence: make(map[string]uint64),
+	}
+}
+
+func presenceKey(roomKey, playerName string) string {
+	return roomKey + "\x00" + playerName
+}
+
+// arrive records that a player has just turned up on a seat — through the join
+// endpoint or by opening a socket — and returns the epoch of that arrival.
+//
+// A reload does both while the socket the old page left behind is still open,
+// and that socket's teardown lands afterwards. Without an ordering, the server
+// processes it as "this player is gone" and takes a player who is sitting
+// right there out of the room. The epoch gives it one: a teardown carrying an
+// epoch older than the seat's current one belongs to a page that has already
+// been replaced, and says nothing about where the player is.
+func (h *Handler) arrive(roomKey, playerName string) uint64 {
+	if playerName == "" {
+		return 0
+	}
+	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
+	h.presence[presenceKey(roomKey, playerName)]++
+	return h.presence[presenceKey(roomKey, playerName)]
+}
+
+// currentEpoch is the latest arrival recorded on a seat.
+func (h *Handler) currentEpoch(roomKey, playerName string) uint64 {
+	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
+	return h.presence[presenceKey(roomKey, playerName)]
+}
+
+// supersededBy reports whether a newer page has taken over this seat since the
+// arrival that epoch names.
+func (h *Handler) supersededBy(roomKey, playerName string, epoch uint64) bool {
+	return h.currentEpoch(roomKey, playerName) > epoch
+}
+
+// forgetPresence drops a torn-down room's arrival counters.
+func (h *Handler) forgetPresence(roomKey string) {
+	prefix := roomKey + "\x00"
+	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
+	for k := range h.presence {
+		if strings.HasPrefix(k, prefix) {
+			delete(h.presence, k)
+		}
+	}
+}
+
+// markBack clears a held seat's drop stamp and, when there was one, tells the
+// room its player is back. Nothing else ever takes that mark off: the rest of
+// the table hears "player_disconnected" when a socket drops, and used to keep
+// showing the player as offline for the whole rest of the game.
+func (h *Handler) markBack(roomID int64, roomKey, playerName string) {
+	wasOffline, err := h.store.MarkPlayerConnected(roomID, playerName)
+	if err != nil {
+		log.Printf("[room] failed to clear the drop stamp for %s: %v", playerName, err)
+		return
+	}
+	if !wasOffline {
+		return
+	}
+	h.hub.BroadcastToRoom(roomKey, models.WSMessage{
+		Type:   "player_reconnected",
+		Room:   roomKey,
+		Player: playerName,
+	})
+}
+
+// touch records that a room just saw activity, which is what keeps the reaper
+// away from it. A failure here only risks reaping a live room early, so it is
+// logged rather than propagated to the player whose action triggered it.
+func (h *Handler) touch(roomID int64) {
+	if err := h.store.TouchRoom(roomID); err != nil {
+		log.Printf("[room] touch %d: %v", roomID, err)
 	}
 }
 
@@ -61,6 +143,17 @@ func (h *Handler) setEKState(roomKey string, gs *game.EKGameState) {
 	h.ekMuGlobal.Lock()
 	defer h.ekMuGlobal.Unlock()
 	h.ekStates[roomKey] = gs
+}
+
+// clearEKState drops a finished game but keeps the room's lock, so a caller
+// already holding it stays mutually excluded with the next request.
+func (h *Handler) clearEKState(roomKey string) {
+	h.ekMuGlobal.Lock()
+	defer h.ekMuGlobal.Unlock()
+	if gs, ok := h.ekStates[roomKey]; ok {
+		game.CancelPendingAction(gs)
+	}
+	delete(h.ekStates, roomKey)
 }
 
 func (h *Handler) removeEKState(roomKey string) {
@@ -96,7 +189,32 @@ func (h *Handler) loadEKState(roomKey string, roomID int64) *game.EKGameState {
 	gs := raw.GameState
 	gs.CancelFunc = make(chan struct{})
 	h.setEKState(roomKey, gs)
+
+	// The clocks live in this process, not in the snapshot. A game rehydrated
+	// here — after a restart, or after the room fell out of memory — carries
+	// deadlines with nothing running behind them: the turn timer that would
+	// force a draw is gone, and so is the one that answers a prompt its player
+	// walked away from. The table would wait forever.
+	//
+	// Each window starts over rather than resuming where it was cut off. The
+	// persisted deadline has usually passed by now, and honouring it would
+	// force a draw for a player whose client has not finished reconnecting;
+	// the server coming back is the first moment anyone could act, so it is
+	// the fair moment to count from.
+	h.rearmEKTimers(roomKey, roomID, gs)
 	return gs
+}
+
+// rearmEKTimers puts the clocks back for a game that was loaded from storage
+// rather than played into memory. Callers of loadEKState hold the room lock,
+// which is the same lock the timer callbacks take.
+func (h *Handler) rearmEKTimers(roomKey string, roomID int64, gs *game.EKGameState) {
+	if gs.Phase == "playing" {
+		log.Printf("[ek] rehydrated room=%s (turn=%s, prompt=%t), restarting its clocks",
+			roomKey, gs.Turn, gs.NopeWindow != nil || gs.PendingDefuse != nil ||
+				gs.PendingFavor != nil || gs.PendingChoice != nil || gs.PendingGarbage != nil)
+	}
+	h.armEKTimers(h.getEKMutex(roomKey), roomKey, roomID, gs, gs.NopeWindow != nil)
 }
 
 func (h *Handler) saveEKState(roomKey string, gs *game.EKGameState) error {
@@ -105,15 +223,35 @@ func (h *Handler) saveEKState(roomKey string, gs *game.EKGameState) error {
 		return err
 	}
 
-	stateWrapper := models.EKRoomState{
-		GameState: gs,
-	}
+	stateWrapper := h.buildEKRoomState(room.ID, gs)
 	stateJSON, err := json.Marshal(stateWrapper)
 	if err != nil {
 		return err
 	}
 
 	return h.store.UpdateSnapshot(room.ID, "", string(stateJSON))
+}
+
+func defaultEKSettings() models.EKRoomSettings {
+	return models.EKRoomSettings{
+		MinPlayers:         2,
+		MaxPlayers:         6,
+		HandSize:           8,
+		StartingDefense:    1,
+		ExplosiveCount:     -1,
+		DeckSizeMultiplier: 1,
+		TurnTimer:          0,
+		IsPublic:           true,
+		AllowSpectators:    false,
+		EnabledCategories: map[string]bool{
+			"explosive": true, "attack": true, "skip": true, "super_skip": true, "reverse": true, "future_vision": true,
+			"nope": true, "shuffle": true, "draw_from_bottom": true,
+			"swap_top_and_bottom": true, "garbage_collection": true,
+			"catomic_bomb": true, "mark": true, "bury": true,
+			"dig_deeper": true, "favor": true, "clone": true,
+			"group_effects": false, "special_power": false, "cat_cards": true,
+		},
+	}
 }
 
 func (h *Handler) CreateRoom(c *gin.Context) {
@@ -137,27 +275,7 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 		return
 	}
 
-	initState := models.EKRoomState{
-		RoomSettings: models.EKRoomSettings{
-			MinPlayers:         2,
-			MaxPlayers:         6,
-			HandSize:           8,
-			StartingDefense:    1,
-			ExplosiveCount:     -1,
-			DeckSizeMultiplier: 1,
-			TurnTimer:          0,
-			IsPublic:           true,
-			AllowSpectators:    false,
-			EnabledCategories: map[string]bool{
-				"explosive": true, "attack": true, "skip": true, "super_skip": true, "reverse": true, "future_vision": true,
-				"nope": true, "shuffle": true, "draw_from_bottom": true,
-				"swap_top_and_bottom": true, "garbage_collection": true,
-				"catomic_bomb": true, "mark": true, "bury": true,
-				"dig_deeper": true, "favor": true, "clone": true,
-				"group_effects": false, "special_power": false, "cat_cards": true,
-			},
-		},
-	}
+	initState := models.EKRoomState{RoomSettings: defaultEKSettings()}
 	stateJSON, _ := json.Marshal(initState)
 	h.store.SaveSnapshot(room.ID, "", string(stateJSON))
 
@@ -180,6 +298,9 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		RoomKey    string `json:"room_key"`
 		PlayerName string `json:"player_name"`
 		Color      string `json:"color"`
+		// Session is the browser tab asking. It is what lets a reload be told
+		// apart from a second person typing the same name.
+		Session string `json:"session"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid json"})
@@ -209,30 +330,37 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 
+	maxPlayers := room.MaxPlayers
 	if game == "ek" {
 		stateJSON, _, snapErr := h.store.GetLatestSnapshot(room.ID)
 		if snapErr == nil && stateJSON != "" {
 			var snap models.EKRoomState
-			if json.Unmarshal([]byte(stateJSON), &snap) == nil && snap.GameState != nil {
-				if snap.GameState.Phase == "playing" || snap.GameState.Phase == "ended" {
-					if _, isInGame := snap.GameState.Players[body.PlayerName]; !isInGame {
-						c.JSON(http.StatusConflict, gin.H{"error": "game is already in progress"})
-						return
+			if json.Unmarshal([]byte(stateJSON), &snap) == nil {
+				if snap.GameState != nil {
+					if snap.GameState.Phase == "playing" || snap.GameState.Phase == "ended" {
+						if _, isInGame := snap.GameState.Players[body.PlayerName]; !isInGame {
+							c.JSON(http.StatusConflict, gin.H{"error": "game is already in progress"})
+							return
+						}
 					}
+				}
+				// The room's own limit, which the lobby lets the host set.
+				if n := snap.RoomSettings.MaxPlayers; n > 0 && n < maxPlayers {
+					maxPlayers = n
 				}
 			}
 		}
 	}
 
-	count, err := h.store.GetActivePlayerCount(room.ID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-		return
-	}
-	if count >= room.MaxPlayers {
-		c.JSON(http.StatusConflict, gin.H{"error": "room is full"})
-		return
-	}
+	// Before the capacity check: a player who is still seated is rejoining,
+	// not taking a new seat. A mid-game disconnect keeps their row (see
+	// HandleDisconnect), so at a full table this used to count them against
+	// the limit and refuse them their own game with "room is full".
+	// Claim the seat before reading it. A reload's request can overtake the
+	// teardown of the socket its previous page left open, and this is what
+	// tells that teardown, when it lands, that it has been superseded.
+	h.arrive(body.RoomKey, body.PlayerName)
+	h.hub.EvictSession(body.RoomKey, body.PlayerName, body.Session)
 
 	exists, err := h.store.IsPlayerInRoom(room.ID, body.PlayerName)
 	if err != nil {
@@ -240,10 +368,15 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 	if exists {
-		if h.hub.IsPlayerConnected(body.RoomKey, body.PlayerName) {
+		// Only a live socket from some other page means the name is taken. The
+		// one a reloading tab left behind is its own, and refusing it was what
+		// threw a player back to the join screen for reloading mid-game.
+		if h.hub.IsPlayerConnectedFromElsewhere(body.RoomKey, body.PlayerName, body.Session) {
 			c.JSON(http.StatusConflict, gin.H{"error": "player is already connected"})
 			return
 		}
+		h.touch(room.ID)
+		h.markBack(room.ID, body.RoomKey, body.PlayerName)
 		players, _ := h.store.GetRoomPlayers(room.ID)
 		playerNames := make([]string, len(players))
 		for i, p := range players {
@@ -259,12 +392,23 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 
+	count, err := h.store.GetActivePlayerCount(room.ID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if count >= maxPlayers {
+		c.JSON(http.StatusConflict, gin.H{"error": "room is full"})
+		return
+	}
+
 	if err := h.store.AddPlayer(room.ID, body.PlayerName, body.Color); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add player"})
 		return
 	}
 
 	h.store.AddTimelineEvent(room.ID, "join", body.PlayerName, "")
+	h.touch(room.ID)
 
 	players, _ := h.store.GetRoomPlayers(room.ID)
 	playerNames := make([]string, len(players))
@@ -303,10 +447,35 @@ func (h *Handler) ListRooms(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	if rooms == nil {
-		rooms = []models.RoomListItem{}
+
+	// A room set to Private is reachable by its key, but is not advertised.
+	// The setting had no effect at all before.
+	public := []models.RoomListItem{}
+	for _, item := range rooms {
+		if game == "ek" && !h.roomIsPublic(item.RoomKey) {
+			continue
+		}
+		public = append(public, item)
 	}
-	c.JSON(http.StatusOK, gin.H{"rooms": rooms})
+	c.JSON(http.StatusOK, gin.H{"rooms": public})
+}
+
+// roomIsPublic reports whether a room should appear in the room list. Rooms
+// whose settings cannot be read are treated as public, as they were before.
+func (h *Handler) roomIsPublic(roomKey string) bool {
+	room, err := h.store.GetRoom(roomKey)
+	if err != nil || room == nil {
+		return true
+	}
+	stateJSON, ok, err := h.store.GetLatestSnapshot(room.ID)
+	if err != nil || !ok || stateJSON == "" {
+		return true
+	}
+	var snap models.EKRoomState
+	if json.Unmarshal([]byte(stateJSON), &snap) != nil {
+		return true
+	}
+	return snap.RoomSettings.IsPublic
 }
 
 func (h *Handler) GetRoom(c *gin.Context) {
@@ -399,20 +568,27 @@ func (h *Handler) GetState(c *gin.Context) {
 	}
 
 	if game == "ek" {
-		gs := h.getEKState(roomKey)
-		if gs != nil {
-			roomState := models.EKRoomState{GameState: gs}
-			stateJSON, _, snapErr := h.store.GetLatestSnapshot(room.ID)
-			if snapErr == nil && stateJSON != "" {
-				var snap models.EKRoomState
-				if json.Unmarshal([]byte(stateJSON), &snap) == nil {
-					roomState.RoomSettings = snap.RoomSettings
-				}
-			}
-			payload, _ := json.Marshal(roomState)
-			c.JSON(http.StatusOK, gin.H{"state": json.RawMessage(payload)})
-			return
+		mu := h.getEKMutex(roomKey)
+		mu.Lock()
+		defer mu.Unlock()
+		// Never fall through to the raw snapshot for ek: it holds every hand
+		// and the deck in draw order.
+		// c.Query("player") is untrusted, but a view built for a name shows
+		// only that player's own hand, which they already hold.
+		roomState := models.EKRoomStateView{RoomSettings: defaultEKSettings()}
+		if gs := h.loadEKState(roomKey, room.ID); gs != nil {
+			roomState.GameState = gs.ViewFor(c.Query("player"))
 		}
+		stateJSON, _, snapErr := h.store.GetLatestSnapshot(room.ID)
+		if snapErr == nil && stateJSON != "" {
+			var snap models.EKRoomState
+			if json.Unmarshal([]byte(stateJSON), &snap) == nil {
+				roomState.RoomSettings = snap.RoomSettings
+			}
+		}
+		payload, _ := json.Marshal(roomState)
+		c.JSON(http.StatusOK, gin.H{"state": json.RawMessage(payload)})
+		return
 	}
 
 	state, ok, err := h.store.GetLatestSnapshot(room.ID)
@@ -474,6 +650,10 @@ func (h *Handler) SaveState(c *gin.Context) {
 			return
 		}
 	}
+
+	// One bump for every validated action, before the game-specific split, so
+	// the reaper sees a room that is being played in as alive.
+	h.touch(room.ID)
 
 	if game == "ek" {
 		h.handleEKAction(c, room, roomKey, body)
@@ -601,13 +781,19 @@ func (h *Handler) handleEKAction(c *gin.Context, room *models.Room, roomKey stri
 					enabledCats = map[string]bool{}
 				}
 
+				explosiveCount := raw.RoomSettings.ExplosiveCount
+				if explosiveCount == 0 {
+					explosiveCount = -1
+				}
+
 				startData, _ := json.Marshal(models.GameStartData{
-					Players:      playersData,
-					TurnOrder:    turnOrder,
-					HandSize:     handSize,
-					DefenseCount: defenseCount,
-					Multiplier:   multiplier,
-					EnabledCats:  enabledCats,
+					Players:        playersData,
+					TurnOrder:      turnOrder,
+					HandSize:       handSize,
+					DefenseCount:   defenseCount,
+					Multiplier:     multiplier,
+					EnabledCats:    enabledCats,
+					ExplosiveCount: explosiveCount,
 				})
 
 				gs := &game.EKGameState{}
@@ -662,6 +848,43 @@ func (h *Handler) handleEKAction(c *gin.Context, room *models.Room, roomKey stri
 		c.JSON(http.StatusOK, gin.H{"ok": true, "state": nil})
 		return
 
+	case "rematch":
+		// Put a finished room back in the lobby, keeping its settings and its
+		// players, so a table can play again without making a new room.
+		gs := h.loadEKState(roomKey, room.ID)
+		if gs == nil || gs.Phase != "ended" {
+			c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": "there's no finished game to replay"})
+			return
+		}
+
+		h.clearEKState(roomKey)
+
+		stateJSON, _, snapErr := h.store.GetLatestSnapshot(room.ID)
+		snap := models.EKRoomState{RoomSettings: defaultEKSettings()}
+		if snapErr == nil && stateJSON != "" {
+			_ = json.Unmarshal([]byte(stateJSON), &snap)
+		}
+		snap.GameState = nil
+		if blob, err := json.Marshal(snap); err == nil {
+			h.store.UpdateSnapshot(room.ID, body.Player, string(blob))
+		}
+
+		h.store.UpdateRoomStatus(room.ID, "active")
+
+		players, _ := h.store.GetRoomPlayers(room.ID)
+		for _, pl := range players {
+			h.store.SetPlayerReady(room.ID, pl.PlayerName, false)
+		}
+
+		h.hub.BroadcastToRoom(roomKey, models.WSMessage{
+			Type:   "rematch",
+			Room:   roomKey,
+			Player: body.Player,
+		})
+
+		c.JSON(http.StatusOK, gin.H{"ok": true})
+		return
+
 	case "join":
 		joinedPayload, _ := json.Marshal(gin.H{"player": body.Player})
 		h.hub.BroadcastToRoom(roomKey, models.WSMessage{
@@ -692,94 +915,122 @@ func (h *Handler) handleEKAction(c *gin.Context, room *models.Room, roomKey stri
 		return
 	}
 
+	// A rejected action leaves the state untouched, so there is nothing to save
+	// or broadcast — just tell the player why.
+	if result.Error != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"ok": false, "error": result.Error})
+		return
+	}
+
 	gs = result.State
 	h.setEKState(roomKey, gs)
 
-	if body.Action == "endGame" || (gs.Phase == "ended") {
-		h.store.RemoveAllPlayers(room.ID)
+	gameOver := gs.Phase == "ended"
+	if gameOver {
+		// Keep the state and the players: the result screen reads them, and a
+		// player who is still "in the room" can leave or delete it afterwards.
+		// Only the clocks stop here.
+		game.CancelPendingAction(gs)
 		h.store.UpdateRoomStatus(room.ID, "ended")
-		h.removeEKState(roomKey)
+	}
+
+	h.applyEKResult(mu, roomKey, room.ID, result, body.Player, gameOver)
+
+	payload, _ := json.Marshal(result.State.ViewFor(body.Player))
+	c.JSON(http.StatusOK, gin.H{"ok": true, "state": json.RawMessage(payload)})
+}
+
+// applyEKResult persists a processed action, publishes it to the room, and
+// restarts whichever clocks the new state calls for. The room mutex is held by
+// every caller, including the timer callbacks.
+func (h *Handler) applyEKResult(mu *sync.Mutex, roomKey string, roomID int64, result *game.ActionResult, requester string, gameOver bool) {
+	gs := result.State
+	if err := h.saveEKState(roomKey, gs); err != nil {
+		log.Printf("[ek] save state error: %v", err)
+	}
+
+	// Before the broadcast: the clocks are what stamp NopeWindow.ExpiredAt and
+	// TurnEndsAt onto the state, and a client that receives a deadline-less
+	// window has no countdown to run, so it ignores the window altogether.
+	h.armEKTimers(mu, roomKey, roomID, gs, result.NopeWindow)
+
+	h.broadcastEKMessages(roomKey, roomID, result.Messages)
+
+	// After the final state, so clients read the winner off a state they have.
+	if gameOver {
 		h.hub.BroadcastToRoom(roomKey, models.WSMessage{
 			Type: "game_ended",
 			Room: roomKey,
 		})
 	}
 
-	if result.NopeWindow {
+	h.sendEKPrompt(roomKey, requester, result.Prompt)
+}
+
+// armEKTimers sets the clocks for the state as it now stands: the Nope
+// countdown, the deadline on a prompt nobody has answered, and the turn timer.
+func (h *Handler) armEKTimers(mu *sync.Mutex, roomKey string, roomID int64, gs *game.EKGameState, nopeWindow bool) {
+	if gs.Phase != "playing" {
+		game.CancelTimers(gs)
+		return
+	}
+
+	if nopeWindow {
 		game.StartNopeWindowTimer(mu, gs, func() {
 			log.Printf("[ek] nope window expired for room=%s", roomKey)
-			resolveAction := game.GameAction{
+			h.runEKTimeout(mu, roomKey, roomID, gs, game.ProcessAction(gs, game.GameAction{
 				Action:  "nopeResolved",
-				Player:  body.Player,
 				RoomKey: roomKey,
-			}
-			result := game.ProcessAction(gs, resolveAction)
-			if result != nil {
-				h.setEKState(roomKey, result.State)
-				h.saveEKState(roomKey, result.State)
-				h.broadcastEKMessages(roomKey, room.ID, result.Messages)
-				if result.Prompt != nil {
-					promptPayload, _ := json.Marshal(result.Prompt.Payload)
-					h.hub.SendToPlayer(roomKey, body.Player, models.WSMessage{
-						Type:    result.Prompt.Type,
-						Room:    roomKey,
-						Player:  body.Player,
-						Payload: promptPayload,
-					})
-				}
-			}
+			}))
 		}, roomKey)
 	}
 
-	if err := h.saveEKState(roomKey, gs); err != nil {
-		log.Printf("[ek] save state error: %v", err)
+	// A player who closes their tab at a defuse prompt used to stop the game
+	// for everyone, since nothing else may happen while one is pending.
+	game.StartPendingTimer(mu, gs, func() {
+		log.Printf("[ek] pending prompt timed out for room=%s", roomKey)
+		h.runEKTimeout(mu, roomKey, roomID, gs, game.AutoResolvePending(gs))
+	})
+
+	game.StartTurnTimer(mu, gs, func() {
+		log.Printf("[ek] turn timeout for room=%s player=%s", roomKey, gs.Turn)
+		h.runEKTimeout(mu, roomKey, roomID, gs, game.ProcessAction(gs, game.GameAction{
+			Action:  "forceDraw",
+			Player:  gs.Turn,
+			RoomKey: roomKey,
+		}))
+	}, h.ekTurnTimerSeconds(roomID))
+}
+
+// runEKTimeout publishes whatever a timer decided on the table's behalf.
+func (h *Handler) runEKTimeout(mu *sync.Mutex, roomKey string, roomID int64, gs *game.EKGameState, result *game.ActionResult) {
+	if result == nil || result.Error != "" {
+		return
+	}
+	h.setEKState(roomKey, result.State)
+
+	gameOver := result.State.Phase == "ended"
+	if gameOver {
+		game.CancelPendingAction(result.State)
+		h.store.UpdateRoomStatus(roomID, "ended")
 	}
 
-	h.broadcastEKMessages(roomKey, room.ID, result.Messages)
+	h.applyEKResult(mu, roomKey, roomID, result, "", gameOver)
+}
 
-	if result.Prompt != nil {
-		result.Prompt.Room = roomKey
-		promptPayload, _ := json.Marshal(result.Prompt.Payload)
-		h.hub.SendToPlayer(roomKey, body.Player, models.WSMessage{
-			Type:    result.Prompt.Type,
-			Room:    roomKey,
-			Player:  body.Player,
-			Payload: promptPayload,
-		})
+// ekTurnTimerSeconds reads the turn limit from the room settings. It used to
+// come from the body of whichever action was being taken, so a client could
+// name any limit it liked and half the actions carried none at all.
+func (h *Handler) ekTurnTimerSeconds(roomID int64) int {
+	stateJSON, ok, err := h.store.GetLatestSnapshot(roomID)
+	if err != nil || !ok || stateJSON == "" {
+		return 0
 	}
-
-	if result.State.Phase == "playing" && result.State.PendingDefuse == nil && result.State.PendingGarbage == nil && result.State.NopeWindow == nil {
-		timerSeconds := 0
-		if body.Data != nil {
-			var data struct {
-				TurnTimer int `json:"turnTimer"`
-			}
-			if json.Unmarshal(body.Data, &data) == nil && data.TurnTimer > 0 {
-				timerSeconds = data.TurnTimer
-			}
-		}
-		if timerSeconds > 0 {
-			go func() {
-				game.StartTurnTimer(mu, gs, func() {
-					log.Printf("[ek] turn timeout for room=%s player=%s", roomKey, gs.Turn)
-					forceAction := game.GameAction{
-						Action:  "forceDraw",
-						Player:  gs.Turn,
-						RoomKey: roomKey,
-					}
-					result := game.ProcessAction(gs, forceAction)
-					if result != nil {
-						h.setEKState(roomKey, result.State)
-						h.saveEKState(roomKey, result.State)
-						h.broadcastEKMessages(roomKey, room.ID, result.Messages)
-					}
-				}, timerSeconds)
-			}()
-		}
+	var snap models.EKRoomState
+	if json.Unmarshal([]byte(stateJSON), &snap) != nil {
+		return 0
 	}
-
-	payload, _ := json.Marshal(result.State)
-	c.JSON(http.StatusOK, gin.H{"ok": true, "state": json.RawMessage(payload)})
+	return snap.RoomSettings.TurnTimer
 }
 
 func (h *Handler) buildEKRoomState(roomID int64, gs *game.EKGameState) *models.EKRoomState {
@@ -794,8 +1045,32 @@ func (h *Handler) buildEKRoomState(roomID int64, gs *game.EKGameState) *models.E
 	return roomState
 }
 
+// sendEKPrompt delivers a private prompt (a defuse choice, a peek at the deck)
+// to the player it names. That is not always whoever sent the request: a Nope
+// window resolves for the player who played the card.
+func (h *Handler) sendEKPrompt(roomKey string, fallbackPlayer string, prompt *game.WSMessage) {
+	if prompt == nil {
+		return
+	}
+	target := prompt.Player
+	if target == "" {
+		target = fallbackPlayer
+	}
+	promptPayload, _ := json.Marshal(prompt.Payload)
+	h.hub.SendToPlayer(roomKey, target, models.WSMessage{
+		Type:    prompt.Type,
+		Room:    roomKey,
+		Player:  target,
+		Payload: promptPayload,
+	})
+}
+
 func (h *Handler) broadcastEKMessages(roomKey string, roomID int64, messages []game.WSMessage) {
 	for _, msg := range messages {
+		if gs, ok := msg.Payload.(*game.EKGameState); ok && msg.Type == "state_updated" {
+			h.broadcastEKState(roomKey, gs)
+			continue
+		}
 		marshaled, _ := json.Marshal(msg.Payload)
 		h.hub.BroadcastToRoom(roomKey, models.WSMessage{
 			Type:    msg.Type,
@@ -803,6 +1078,90 @@ func (h *Handler) broadcastEKMessages(roomKey string, roomID int64, messages []g
 			Payload: marshaled,
 		})
 	}
+}
+
+// broadcastEKState sends every connected player the game as only they may see
+// it. Never broadcast the raw state: it carries every hand and the deck order.
+func (h *Handler) broadcastEKState(roomKey string, gs *game.EKGameState) {
+	for _, player := range h.hub.ConnectedPlayers(roomKey) {
+		payload, _ := json.Marshal(gs.ViewFor(player))
+		h.hub.SendToPlayer(roomKey, player, models.WSMessage{
+			Type:    "state_updated",
+			Room:    roomKey,
+			Player:  player,
+			Payload: payload,
+		})
+	}
+}
+
+// HandleDisconnect decides what a dropped socket means. In a lobby it means the
+// player left. Mid-game it does not: they are still in the game, still in the
+// turn order, and taking them out of the room would refuse every action they
+// tried after reconnecting.
+func (h *Handler) HandleDisconnect(roomKey, playerName string, epoch uint64) {
+	if h.stillHere(roomKey, playerName, epoch) {
+		return
+	}
+
+	room, err := h.store.GetRoom(roomKey)
+	if err != nil || room == nil {
+		return
+	}
+
+	inGame := false
+	if room.Game == "ek" {
+		mu := h.getEKMutex(roomKey)
+		mu.Lock()
+		if gs := h.loadEKState(roomKey, room.ID); gs != nil && gs.Phase == "playing" {
+			if p, ok := gs.Players[playerName]; ok && p != nil && p.Alive {
+				inGame = true
+			}
+		}
+		mu.Unlock()
+	}
+
+	// Checked again: the reads above take long enough for a reloading page to
+	// finish joining in the middle of them, and acting on a stale teardown
+	// after that point is what used to take a player out of their own room.
+	if h.stillHere(roomKey, playerName, epoch) {
+		return
+	}
+
+	if inGame {
+		// Stamp the seat rather than releasing it. The seat is still theirs,
+		// but now it has a clock on it: the reaper reclaims it if they stay
+		// away, instead of the table waiting on them indefinitely.
+		if err := h.store.MarkPlayerDisconnected(room.ID, playerName); err != nil {
+			log.Printf("[ws] failed to stamp %s in room %s: %v", playerName, roomKey, err)
+		}
+		h.hub.BroadcastToRoom(roomKey, models.WSMessage{
+			Type:   "player_disconnected",
+			Room:   roomKey,
+			Player: playerName,
+		})
+		log.Printf("[ws] player dropped mid-game, holding their seat: room=%s player=%s", roomKey, playerName)
+		return
+	}
+
+	if err := h.store.RemovePlayerByRoomKey(roomKey, playerName); err != nil {
+		log.Printf("[ws] failed to remove player %s from room %s: %v", playerName, roomKey, err)
+		return
+	}
+	h.hub.BroadcastToRoom(roomKey, models.WSMessage{
+		Type:   "player_left",
+		Room:   roomKey,
+		Player: playerName,
+	})
+	log.Printf("[ws] player disconnected: room=%s player=%s", roomKey, playerName)
+}
+
+// stillHere reports whether a dropped socket's player is in fact present: a
+// newer page has claimed the seat, or another one of theirs is still open.
+func (h *Handler) stillHere(roomKey, playerName string, epoch uint64) bool {
+	if h.supersededBy(roomKey, playerName, epoch) {
+		return true
+	}
+	return h.hub.IsPlayerConnected(roomKey, playerName)
 }
 
 func (h *Handler) GetPlayers(c *gin.Context) {
@@ -858,20 +1217,23 @@ func (h *Handler) DeleteRoom(c *gin.Context) {
 	}
 
 	playerName := c.Query("player")
-	if playerName != "" {
-		inRoom, err := h.store.IsPlayerInRoom(room.ID, playerName)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
-			return
-		}
-		if !inRoom {
-			c.JSON(http.StatusForbidden, gin.H{"error": "player not in room"})
-			return
-		}
+	if playerName == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only a player in the room can delete it"})
+		return
+	}
+	inRoom, err := h.store.IsPlayerInRoom(room.ID, playerName)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	if !inRoom {
+		c.JSON(http.StatusForbidden, gin.H{"error": "player not in room"})
+		return
 	}
 
 	h.hub.CloseRoom(roomKey)
 	h.removeEKState(roomKey)
+	h.forgetPresence(roomKey)
 
 	if err := h.store.DeleteRoom(roomKey); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete room"})

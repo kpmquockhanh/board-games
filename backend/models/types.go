@@ -24,6 +24,9 @@ type Room struct {
 	Status     string    `json:"status"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// LastActivityAt is the room's own clock, bumped by anything a player
+	// does in it. The reaper measures silence by this, not by UpdatedAt.
+	LastActivityAt time.Time `json:"last_activity_at"`
 }
 
 type RoomPlayer struct {
@@ -34,6 +37,20 @@ type RoomPlayer struct {
 	Ready      bool       `json:"ready"`
 	JoinedAt   time.Time  `json:"joined_at"`
 	LeftAt     *time.Time `json:"left_at"`
+	// DisconnectedAt is set while a player's seat is being held for them
+	// after their socket dropped. Null means they are connected, or gone for
+	// good — LeftAt tells those two apart.
+	DisconnectedAt *time.Time `json:"disconnected_at"`
+}
+
+// StalePlayer is a held seat whose player has been gone long enough to
+// reclaim it.
+type StalePlayer struct {
+	RoomID         int64     `json:"room_id"`
+	RoomKey        string    `json:"room_key"`
+	Game           string    `json:"game"`
+	PlayerName     string    `json:"player_name"`
+	DisconnectedAt time.Time `json:"disconnected_at"`
 }
 
 type TimelineEvent struct {
@@ -61,9 +78,17 @@ type SaveStateRequest struct {
 
 // --- Room state (stored as JSON in timelines table) ---
 
+// EKRoomState is the server's own record, stored as a snapshot. It holds every
+// hand and the deck, so it never goes to a client — see EKRoomStateView.
 type EKRoomState struct {
-	RoomSettings EKRoomSettings     `json:"roomSettings"`
-	GameState    *game.EKGameState  `json:"gameState,omitempty"`
+	RoomSettings EKRoomSettings    `json:"roomSettings"`
+	GameState    *game.EKGameState `json:"gameState,omitempty"`
+}
+
+// EKRoomStateView is the same room as one player may see it.
+type EKRoomStateView struct {
+	RoomSettings EKRoomSettings `json:"roomSettings"`
+	GameState    *game.GameView `json:"gameState,omitempty"`
 }
 
 type EKRoomSettings struct {
@@ -80,12 +105,13 @@ type EKRoomSettings struct {
 }
 
 type GameStartData struct {
-	Players      map[string]*game.PlayerState `json:"players"`
-	TurnOrder    []string                      `json:"turnOrder"`
-	HandSize     int                           `json:"handSize"`
-	DefenseCount int                           `json:"defenseCount"`
-	Multiplier   float64                       `json:"multiplier"`
-	EnabledCats  map[string]bool               `json:"enabledCats"`
+	Players        map[string]*game.PlayerState `json:"players"`
+	TurnOrder      []string                     `json:"turnOrder"`
+	HandSize       int                          `json:"handSize"`
+	DefenseCount   int                          `json:"defenseCount"`
+	Multiplier     float64                      `json:"multiplier"`
+	EnabledCats    map[string]bool              `json:"enabledCats"`
+	ExplosiveCount int                          `json:"explosiveCount"`
 }
 
 // --- Hotpot game state ---
@@ -141,24 +167,24 @@ var validActions = map[string]map[string]bool{
 		"cheer": true,
 		"chat":  true,
 	},
+	// Only actions a client is allowed to send. startGame, nopeResolved and
+	// forceDraw are driven by the server itself (ready-up, the Nope timer and
+	// the turn timer) and would let a player restart a game, cut the Nope
+	// window short or draw for someone else.
 	"ek": {
-		"startGame":               true,
-		"drawCard":                true,
-		"playCard":                true,
-		"playCombo":               true,
-		"playNope":                true,
-		"nopeResolved":            true,
-		"resolveDefuse":           true,
+		"drawCard":                 true,
+		"playCard":                 true,
+		"playCombo":                true,
+		"playNope":                 true,
+		"passNope":                 true,
+		"resolveDefuse":            true,
 		"resolveGarbageCollection": true,
-		"resolveFavor":            true,
-		"forceDraw":               true,
-		"defuse":                  true,
-		"eliminate":               true,
-		"endGame":                 true,
-		"update":                  true,
-		"updateSettings":          true,
-		"toggleReady":             true,
-		"join":                    true,
+		"resolveFavor":             true,
+		"resolveChoice":            true,
+		"updateSettings":           true,
+		"toggleReady":              true,
+		"rematch":                  true,
+		"join":                     true,
 	},
 }
 
