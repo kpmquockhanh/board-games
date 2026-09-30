@@ -41,6 +41,9 @@ type RoomPlayer struct {
 	// after their socket dropped. Null means they are connected, or gone for
 	// good — LeftAt tells those two apart.
 	DisconnectedAt *time.Time `json:"disconnected_at"`
+	// UserID is the account in the seat. Never sent: the roster goes to
+	// every player, and an account id is not theirs to see.
+	UserID *string `json:"-"`
 }
 
 // StalePlayer is a held seat whose player has been gone long enough to
@@ -244,4 +247,78 @@ func validateEKState(state json.RawMessage) error {
 		s.AttackStack = 0
 	}
 	return nil
+}
+
+// User is the person behind a browser: a guest made silently on their first
+// join, kept by a cookie. It says who someone is across rooms and visits; the
+// seat token still says which seat in a room a tab is sitting in.
+type User struct {
+	ID          string    `json:"id"`
+	Guest       bool      `json:"guest"`
+	DisplayName string    `json:"display_name"`
+	Color       string    `json:"color"`
+	CreatedAt   time.Time `json:"created_at"`
+	LastSeenAt  time.Time `json:"last_seen_at"`
+}
+
+// Identity is who a login provider says someone is. Subject is the
+// provider's stable id for them; the name and email are only what the
+// provider showed at the time.
+type Identity struct {
+	Provider string
+	Subject  string
+	Name     string
+	Email    string
+}
+
+// Seat is a room an account is sitting in, for the list of games it can
+// go back to. Held means the seat is waiting for its player to come back.
+type Seat struct {
+	Game       string `json:"game"`
+	RoomKey    string `json:"room_key"`
+	RoomName   string `json:"room_name"`
+	PlayerName string `json:"player_name"`
+	Color      string `json:"color"`
+	Held       bool   `json:"held"`
+}
+
+// MatchRecord is a finished game as it is written down: who played it, who
+// won, and which seats were whose at the end.
+type MatchRecord struct {
+	Game      string
+	RoomID    int64
+	RoomKey   string
+	RoomName  string
+	StartedAt time.Time
+	EndedAt   time.Time
+	Players   []MatchPlayer
+}
+
+type MatchPlayer struct {
+	Name  string `json:"name"`
+	Color string `json:"color"`
+	Won   bool   `json:"won"`
+	// You marks the seats the asking account played in.
+	You bool `json:"you"`
+}
+
+// Match is a finished game in an account's history.
+type Match struct {
+	ID        int64         `json:"id"`
+	Game      string        `json:"game"`
+	RoomName  string        `json:"room_name"`
+	StartedAt time.Time     `json:"started_at"`
+	EndedAt   time.Time     `json:"ended_at"`
+	Players   []MatchPlayer `json:"players"`
+}
+
+// Companion is someone an account has finished games with. They are known by
+// the account behind their seat, so a player who changes their name between
+// games is still one person, and are shown under the name and colour they
+// last played with.
+type Companion struct {
+	Name         string    `json:"name"`
+	Color        string    `json:"color"`
+	Games        int       `json:"games"`
+	LastPlayedAt time.Time `json:"last_played_at"`
 }

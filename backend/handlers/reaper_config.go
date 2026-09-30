@@ -18,6 +18,7 @@ const (
 	EnvReapDeleteAfter     = "REAP_DELETE_AFTER"
 	EnvReapDropPlayerAfter = "REAP_DROP_PLAYER_AFTER"
 	EnvReapTimelineKeep    = "REAP_TIMELINE_KEEP"
+	EnvReapGuestsAfter     = "REAP_GUESTS_AFTER"
 )
 
 // ReaperConfigFromEnv is DefaultReaperConfig with any REAP_* overrides applied.
@@ -36,6 +37,7 @@ func ReaperConfigFromEnv() ReaperConfig {
 	cfg.DeleteAfter = envDuration(EnvReapDeleteAfter, cfg.DeleteAfter)
 	cfg.DropPlayerAfter = envDuration(EnvReapDropPlayerAfter, cfg.DropPlayerAfter)
 	cfg.TimelineKeep = envInt(EnvReapTimelineKeep, cfg.TimelineKeep)
+	cfg.GuestsAfter = envDuration(EnvReapGuestsAfter, cfg.GuestsAfter)
 
 	// Worth saying out loud rather than silently obeying: holding a seat for
 	// longer than the room itself survives means the room is abandoned out

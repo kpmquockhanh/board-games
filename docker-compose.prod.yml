@@ -7,6 +7,11 @@ services:
       - "8080"
     environment:
       - DB_PATH=/data/ping.db
+      - AUTH_BASE_URL=${AUTH_BASE_URL:-}
+      - AUTH_GOOGLE_CLIENT_ID=${AUTH_GOOGLE_CLIENT_ID:-}
+      - AUTH_GOOGLE_CLIENT_SECRET=${AUTH_GOOGLE_CLIENT_SECRET:-}
+      - AUTH_DISCORD_CLIENT_ID=${AUTH_DISCORD_CLIENT_ID:-}
+      - AUTH_DISCORD_CLIENT_SECRET=${AUTH_DISCORD_CLIENT_SECRET:-}
     healthcheck:
       test: ["CMD", "wget", "-q", "--spider", "http://localhost:8080/api/hotpot/rooms"]
       interval: 5s

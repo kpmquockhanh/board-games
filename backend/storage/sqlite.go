@@ -107,6 +107,17 @@ func migrate(db *sql.DB) error {
 		return fmt.Errorf("create disconnected index: %w", err)
 	}
 
+	// Migration: seat_token holds the SHA-256 of the secret a seat was issued
+	// when it was taken. The name alone used to be the whole identity, so
+	// anyone who typed a player's name could act as them and read their hand.
+	// Seats taken before this column existed have none; see ClaimUntokenedSeat.
+	_, _ = db.Exec("ALTER TABLE room_players ADD COLUMN seat_token TEXT")
+	if _, err := db.Exec(
+		"CREATE INDEX IF NOT EXISTS idx_room_players_seat_token ON room_players(room_id, seat_token)",
+	); err != nil {
+		return fmt.Errorf("create seat token index: %w", err)
+	}
+
 	_, _ = db.Exec("ALTER TABLE rooms ADD COLUMN last_activity_at DATETIME")
 	if _, err := db.Exec(
 		"UPDATE rooms SET last_activity_at = COALESCE(updated_at, created_at) WHERE last_activity_at IS NULL",
@@ -117,6 +128,10 @@ func migrate(db *sql.DB) error {
 		"CREATE INDEX IF NOT EXISTS idx_rooms_status_activity ON rooms(status, last_activity_at)",
 	); err != nil {
 		return fmt.Errorf("create activity index: %w", err)
+	}
+
+	if err := migrateUsers(db); err != nil {
+		return err
 	}
 
 	// One-time cleanup of the rows orphaned while the cascade was inert.
@@ -366,12 +381,65 @@ func (s *SQLiteStorage) ListActiveRooms(game string) ([]models.RoomListItem, err
 	return rooms, nil
 }
 
-func (s *SQLiteStorage) AddPlayer(roomID int64, playerName, color string) error {
+// AddPlayer seats a player. userID is the account behind them, or "" when
+// there is none to record.
+func (s *SQLiteStorage) AddPlayer(roomID int64, playerName, color, seatTokenHash, userID string) error {
 	_, err := s.db.Exec(
-		"INSERT INTO room_players (room_id, player_name, color) VALUES (?, ?, ?) ON CONFLICT(room_id, player_name) DO UPDATE SET color = excluded.color, ready = 0, left_at = NULL, disconnected_at = NULL",
-		roomID, playerName, color,
+		"INSERT INTO room_players (room_id, player_name, color, seat_token, user_id) VALUES (?, ?, ?, ?, NULLIF(?, '')) ON CONFLICT(room_id, player_name) DO UPDATE SET color = excluded.color, seat_token = excluded.seat_token, user_id = excluded.user_id, ready = 0, left_at = NULL, disconnected_at = NULL",
+		roomID, playerName, color, seatTokenHash, userID,
 	)
 	return err
+}
+
+// SeatHolder names the player a seat token was issued to in a room, and
+// whether that player is still seated there. A player who has left keeps
+// their row, and with it their token, until someone takes the name again.
+func (s *SQLiteStorage) SeatHolder(roomID int64, seatTokenHash string) (string, bool, error) {
+	if seatTokenHash == "" {
+		return "", false, nil
+	}
+	var name string
+	var seated bool
+	err := s.db.QueryRow(
+		"SELECT player_name, left_at IS NULL FROM room_players WHERE room_id = ? AND seat_token = ?",
+		roomID, seatTokenHash,
+	).Scan(&name, &seated)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	return name, seated, err
+}
+
+// ClaimUntokenedSeat gives a seat taken before seat tokens existed the token
+// of whoever rejoins it first. It reports false once the seat has a token.
+func (s *SQLiteStorage) ClaimUntokenedSeat(roomID int64, playerName, seatTokenHash string) (bool, error) {
+	res, err := s.db.Exec(
+		"UPDATE room_players SET seat_token = ? WHERE room_id = ? AND player_name = ? AND left_at IS NULL AND (seat_token IS NULL OR seat_token = '')",
+		seatTokenHash, roomID, playerName,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+// ReissueSeatToken gives a seat a new token, if the seat belongs to the
+// given account. It is how an account takes its seat to another device; the
+// token the seat had before stops working.
+func (s *SQLiteStorage) ReissueSeatToken(roomID int64, playerName, userID, seatTokenHash string) (bool, error) {
+	if userID == "" {
+		return false, nil
+	}
+	res, err := s.db.Exec(
+		"UPDATE room_players SET seat_token = ? WHERE room_id = ? AND player_name = ? AND left_at IS NULL AND user_id = ?",
+		seatTokenHash, roomID, playerName, userID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 func (s *SQLiteStorage) RemovePlayer(roomID int64, playerName string) error {
@@ -473,7 +541,7 @@ func (s *SQLiteStorage) DeleteRoom(roomKey string) error {
 
 func (s *SQLiteStorage) GetRoomPlayers(roomID int64) ([]models.RoomPlayer, error) {
 	rows, err := s.db.Query(
-		"SELECT id, room_id, player_name, color, ready, joined_at, left_at, disconnected_at FROM room_players WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at",
+		"SELECT id, room_id, player_name, color, ready, joined_at, left_at, disconnected_at, user_id FROM room_players WHERE room_id = ? AND left_at IS NULL ORDER BY joined_at",
 		roomID,
 	)
 	if err != nil {
@@ -484,7 +552,7 @@ func (s *SQLiteStorage) GetRoomPlayers(roomID int64) ([]models.RoomPlayer, error
 	var players []models.RoomPlayer
 	for rows.Next() {
 		var p models.RoomPlayer
-		if err := rows.Scan(&p.ID, &p.RoomID, &p.PlayerName, &p.Color, &p.Ready, &p.JoinedAt, &p.LeftAt, &p.DisconnectedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.RoomID, &p.PlayerName, &p.Color, &p.Ready, &p.JoinedAt, &p.LeftAt, &p.DisconnectedAt, &p.UserID); err != nil {
 			continue
 		}
 		players = append(players, p)

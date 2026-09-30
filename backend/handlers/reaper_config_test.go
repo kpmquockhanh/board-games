@@ -19,6 +19,7 @@ func TestReaperConfigFromEnvAppliesOverrides(t *testing.T) {
 	t.Setenv(EnvReapDeleteAfter, "72h")
 	t.Setenv(EnvReapDropPlayerAfter, "45s")
 	t.Setenv(EnvReapTimelineKeep, "10")
+	t.Setenv(EnvReapGuestsAfter, "720h")
 
 	want := ReaperConfig{
 		Enabled:         false,
@@ -27,6 +28,7 @@ func TestReaperConfigFromEnvAppliesOverrides(t *testing.T) {
 		DeleteAfter:     72 * time.Hour,
 		DropPlayerAfter: 45 * time.Second,
 		TimelineKeep:    10,
+		GuestsAfter:     30 * 24 * time.Hour,
 	}
 	if got := ReaperConfigFromEnv(); got != want {
 		t.Fatalf("got %+v, want %+v", got, want)

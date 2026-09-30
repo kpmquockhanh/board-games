@@ -77,7 +77,7 @@ export const useHotpotStore = defineStore('hotpot', {
       this._stopPoll()
 
       if (this.me && this.roomKey) {
-        await deleteRoom(GAME_CODE, this.roomKey, this.me.name)
+        await deleteRoom(GAME_CODE, this.roomKey)
       }
       this._ws.disconnect()
       this.me = null

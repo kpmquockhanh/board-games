@@ -42,6 +42,10 @@ type ReaperConfig struct {
 	DropPlayerAfter time.Duration
 	// TimelineKeep is how many non-snapshot events each room retains.
 	TimelineKeep int
+	// GuestsAfter is how long a guest account is kept after its browser was
+	// last seen. A guest cannot log back in, so once its cookie is gone the
+	// row is unreachable; this is the bound on how many of those pile up.
+	GuestsAfter time.Duration
 }
 
 func DefaultReaperConfig() ReaperConfig {
@@ -52,6 +56,7 @@ func DefaultReaperConfig() ReaperConfig {
 		DeleteAfter:     24 * time.Hour,
 		DropPlayerAfter: 5 * time.Minute,
 		TimelineKeep:    200,
+		GuestsAfter:     90 * 24 * time.Hour,
 	}
 }
 
@@ -61,6 +66,7 @@ type ReapStats struct {
 	Deleted      int
 	Forfeited    int
 	EventsPruned int64
+	GuestsPruned int64
 	Skipped      int
 }
 
@@ -106,9 +112,15 @@ func (h *Handler) ReapOnce(now time.Time, cfg ReaperConfig) ReapStats {
 		stats.EventsPruned = n
 	}
 
-	if stats.Abandoned > 0 || stats.Deleted > 0 || stats.Forfeited > 0 || stats.EventsPruned > 0 {
-		log.Printf("[reaper] forfeited=%d abandoned=%d deleted=%d events_pruned=%d",
-			stats.Forfeited, stats.Abandoned, stats.Deleted, stats.EventsPruned)
+	if n, err := h.store.DeleteIdleGuests(now.Add(-cfg.GuestsAfter)); err != nil {
+		log.Printf("[reaper] prune guests: %v", err)
+	} else {
+		stats.GuestsPruned = n
+	}
+
+	if stats.Abandoned > 0 || stats.Deleted > 0 || stats.Forfeited > 0 || stats.EventsPruned > 0 || stats.GuestsPruned > 0 {
+		log.Printf("[reaper] forfeited=%d abandoned=%d deleted=%d events_pruned=%d guests_pruned=%d",
+			stats.Forfeited, stats.Abandoned, stats.Deleted, stats.EventsPruned, stats.GuestsPruned)
 	}
 	return stats
 }

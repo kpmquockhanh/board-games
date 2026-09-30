@@ -8,7 +8,9 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
-      '/api': backendUrl,
+      // xfwd passes on the host the browser used, which login needs for
+      // the address the provider sends people back to.
+      '/api': { target: backendUrl, changeOrigin: true, xfwd: true },
       '/ws': { target: backendUrl.replace('http', 'ws'), ws: true }
     }
   }

@@ -334,7 +334,7 @@ export const useEkStore = defineStore('explodingKitchen', {
     async deleteRoom() {
 
       if (this.me && this.roomKey) {
-        await deleteRoom(GAME_CODE, this.roomKey, this.me.name)
+        await deleteRoom(GAME_CODE, this.roomKey)
       }
       this._disconnectWs()
       this.me = null
@@ -390,7 +390,7 @@ export const useEkStore = defineStore('explodingKitchen', {
 
 
       const [stateRes, playersData] = await Promise.all([
-        getRoomState(GAME_CODE, this.roomKey, player.name),
+        getRoomState(GAME_CODE, this.roomKey),
         getPlayers(GAME_CODE, this.roomKey),
       ])
 
@@ -792,7 +792,8 @@ export const useEkStore = defineStore('explodingKitchen', {
       // another copy of every handler on the shared socket store.
       this._wsOff = [
         ws.onMessage((msg) => this._handleWsMessage(msg)),
-        ws.onOpen((reopened) => { if (reopened) this._rejoinAfterReconnect() }),
+        ws.beforeReconnect(() => this._rejoinBeforeReconnect()),
+        ws.onOpen((reopened) => { if (reopened) this._refreshRoomSettings() }),
       ]
     },
 
@@ -808,19 +809,27 @@ export const useEkStore = defineStore('explodingKitchen', {
     },
 
     // A dropped socket takes the player out of the room on the server, so every
-    // action afterwards is refused until they are put back in it.
-    async _rejoinAfterReconnect() {
+    // action afterwards is refused until they are put back in it. That has to
+    // happen before the socket opens again, not after: joining drops any socket
+    // this tab has open on the seat, taking it for one a reload left behind, so
+    // rejoining once reconnected closed the new socket, whose reconnect
+    // rejoined, and so on for as long as the page stayed open.
+    async _rejoinBeforeReconnect() {
       if (!this.me || !this.roomKey) return
 
       const result = await joinRoom(GAME_CODE, this.roomKey, this.me.name, this.me.color)
-      if (result?.error && !/already connected/i.test(result.error)) {
+      // A network error is the server still being away; the socket's own
+      // retries cover that, and this runs again before each one.
+      if (result?.error && !/already connected|network error/i.test(result.error)) {
         toast.error(`Couldn't rejoin: ${result.error}`)
-        return
       }
+    },
 
-      // The server pushes the game state on connect; this is for the room
-      // settings, which it does not.
-      const stateRes = await getRoomState(GAME_CODE, this.roomKey, this.me.name)
+    // The server pushes the game state on connect; this is for the room
+    // settings, which it does not.
+    async _refreshRoomSettings() {
+      if (!this.roomKey) return
+      const stateRes = await getRoomState(GAME_CODE, this.roomKey)
       if (stateRes?.state?.roomSettings) {
         this.roomState.roomSettings = { ...defaultRoomSettings(), ...stateRes.state.roomSettings }
       }

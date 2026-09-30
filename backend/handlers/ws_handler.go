@@ -32,6 +32,30 @@ func (h *Handler) HandleWS(c *gin.Context) {
 		room = "default"
 	}
 
+	// A socket for a player receives that player's view and private prompts,
+	// so it has to carry their seat's token. A left seat's token still counts:
+	// a lobby drop takes the player out of the room, and their page reconnects
+	// the socket before it rejoins. Once someone else takes the name, the old
+	// token names nobody.
+	relay := false
+	if player != "" {
+		r, err := h.store.GetRoom(room)
+		if err != nil || r == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "room not found"})
+			return
+		}
+		relay = r.Game == "hotpot"
+		holder, _, err := h.store.SeatHolder(r.ID, hashSecret(presentedSeatToken(c)))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		if holder != player {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "not your seat"})
+			return
+		}
+	}
+
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("[ws] upgrade error: %v", err)
@@ -71,7 +95,7 @@ func (h *Handler) HandleWS(c *gin.Context) {
 	}
 
 	go clientWritePump(client)
-	go clientReadPump(client)
+	go clientReadPump(client, relay)
 }
 
 func (h *Handler) sendCurrentStateToClient(client *ws.Client, roomKey, playerName string) {
@@ -124,7 +148,45 @@ func (h *Handler) sendCurrentStateToClient(client *ws.Client, roomKey, playerNam
 	h.hub.Send(client, data)
 }
 
-func clientReadPump(c *ws.Client) {
+// relayedTypes are the messages a client may send to the rest of its room:
+// Hotpot's live feed, which is also saved through the state endpoint. Nothing
+// else is passed on. Everything a client used to be able to send went to the
+// whole room as is, so any page could fake a state_updated, a prompt, or a
+// room_deleted for everyone else.
+var relayedTypes = map[string]bool{
+	"join":  true,
+	"leave": true,
+	"drop":  true,
+	"cheer": true,
+	"chat":  true,
+}
+
+// relayable returns the message as it may go to the room, or false if it may
+// not. The name in the payload is what the feed shows, so it is set to the
+// socket's own player, whose seat token was checked when it opened.
+func relayable(msg models.WSMessage, player string) (models.WSMessage, bool) {
+	if player == "" || !relayedTypes[msg.Type] {
+		return msg, false
+	}
+	payload := map[string]any{}
+	if len(msg.Payload) > 0 {
+		if err := json.Unmarshal(msg.Payload, &payload); err != nil {
+			return msg, false
+		}
+	}
+	payload["name"] = player
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return msg, false
+	}
+	msg.Payload = raw
+	return msg, true
+}
+
+// clientReadPump reads until the socket goes away. Only sockets in rooms that
+// use the relay (relay) pass anything on; the rest are read to notice pongs
+// and the close.
+func clientReadPump(c *ws.Client, relay bool) {
 	defer func() {
 		c.Hub.Unregister(c)
 		c.Conn.Close()
@@ -152,10 +214,16 @@ func clientReadPump(c *ws.Client) {
 			continue
 		}
 
+		if !relay {
+			continue
+		}
 		msg.Room = c.Room
 		msg.Player = c.Player
-
-		c.Hub.BroadcastToRoom(c.Room, msg)
+		out, ok := relayable(msg, c.Player)
+		if !ok {
+			continue
+		}
+		c.Hub.BroadcastToRoom(c.Room, out)
 	}
 }
 

@@ -1,11 +1,13 @@
 import { defineStore } from 'pinia'
 import { getSessionId } from '../session'
+import { loadSeatToken } from '../seatToken'
 
 function getWsUrl(room, player) {
   // The session id travels with the socket so the server can recognise the one
   // this tab left open before a reload and drop it, instead of reading it as a
-  // second player on the seat.
-  const query = `room=${encodeURIComponent(room)}&player=${encodeURIComponent(player)}&session=${encodeURIComponent(getSessionId())}`
+  // second player on the seat. The seat token proves the seat is this tab's;
+  // it is read on every (re)connect, so a rejoin that issued a new one is used.
+  const query = `room=${encodeURIComponent(room)}&player=${encodeURIComponent(player)}&session=${encodeURIComponent(getSessionId())}&token=${encodeURIComponent(loadSeatToken(room))}`
   const env = import.meta.env.VITE_WS_URL
   if (env) {
     return `${env}/ws?${query}`
@@ -23,6 +25,7 @@ export const useWsStore = defineStore('ws', {
 
   actions: {
     connect(room, player) {
+      this._generation = (this._generation || 0) + 1
       this.room = room
       this.player = player
       if (!this._handlers) this._handlers = []
@@ -93,7 +96,18 @@ export const useWsStore = defineStore('ws', {
       }
     },
 
+    // Called before every reconnect, and awaited: whatever has to happen before
+    // the socket opens again, such as sitting back down in the room.
+    beforeReconnect(handler) {
+      if (!this._reconnectHandlers) this._reconnectHandlers = []
+      this._reconnectHandlers.push(handler)
+      return () => {
+        this._reconnectHandlers = this._reconnectHandlers.filter((h) => h !== handler)
+      }
+    },
+
     disconnect() {
+      this._generation = (this._generation || 0) + 1
       this._intentionalClose = true
       if (this._reconnectTimer) {
         clearTimeout(this._reconnectTimer)
@@ -111,8 +125,18 @@ export const useWsStore = defineStore('ws', {
 
     _scheduleReconnect() {
       if (this._reconnectTimer) return
-      this._reconnectTimer = setTimeout(() => {
+      const generation = this._generation
+      this._reconnectTimer = setTimeout(async () => {
         this._reconnectTimer = null
+        for (const h of this._reconnectHandlers || []) {
+          try {
+            await h()
+          } catch (e) {
+            console.error('[ws] before reconnect:', e)
+          }
+        }
+        // The page left the room, or went to another, while that ran.
+        if (this._generation !== generation) return
         this.connect(this.room, this.player)
       }, this._reconnectDelay)
       this._reconnectDelay = Math.min(this._reconnectDelay * 2, 10000)
