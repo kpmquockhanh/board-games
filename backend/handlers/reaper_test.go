@@ -128,7 +128,7 @@ func TestReapDeletesExpiredRoomsOnly(t *testing.T) {
 	h.store.UpdateRoomStatus(recent.ID, StatusEnded)
 
 	old := postCreate(t, h, r, "long over")
-	h.store.AddPlayer(old.ID, "ana", "red")
+	h.store.AddPlayer(old.ID, "ana", "red", "", "")
 	h.store.AddTimelineEvent(old.ID, "join", "ana", "")
 	h.store.UpdateRoomStatus(old.ID, StatusEnded)
 

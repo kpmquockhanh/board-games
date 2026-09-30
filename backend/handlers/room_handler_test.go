@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"ping/models"
@@ -32,6 +33,9 @@ func newTestHandler(t *testing.T) (*Handler, *gin.Engine) {
 	// same path it does in the running server.
 	hub.OnDisconnect(h.HandleDisconnect)
 	r := gin.New()
+	r.Use(h.Identify)
+	h.RegisterAccount(r.Group("/api"))
+	h.RegisterAuth(r.Group("/api"))
 	r.POST("/api/:game/create", h.CreateRoom)
 	r.POST("/api/:game/join", h.JoinRoom)
 	return h, r
@@ -64,14 +68,34 @@ func postCreate(t *testing.T, h *Handler, r *gin.Engine, name string) *models.Ro
 
 func postJoin(t *testing.T, r *gin.Engine, roomKey, player string) *httptest.ResponseRecorder {
 	t.Helper()
-	body, _ := json.Marshal(map[string]string{
-		"room_key": roomKey, "player_name": player, "color": "red",
-	})
-	req := httptest.NewRequest(http.MethodPost, "/api/ek/join", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	return w
+	return postJoinAs(t, r, roomKey, player, "")
+}
+
+// seatTokens stands in for a browser's storage: tests join, reload, and dial
+// as the same player the way a tab does, carrying the token its seat was given.
+var seatTokens sync.Map
+
+func seatKey(roomKey, player string) string { return roomKey + "\x00" + player }
+
+func seatTokenOf(roomKey, player string) string {
+	if v, ok := seatTokens.Load(seatKey(roomKey, player)); ok {
+		return v.(string)
+	}
+	return ""
+}
+
+func rememberSeatToken(t *testing.T, roomKey, player string, w *httptest.ResponseRecorder) {
+	t.Helper()
+	if w.Code != http.StatusOK {
+		return
+	}
+	var out struct {
+		SeatToken string `json:"seat_token"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil || out.SeatToken == "" {
+		t.Fatalf("join gave %s no seat token: %s", player, w.Body)
+	}
+	seatTokens.Store(seatKey(roomKey, player), out.SeatToken)
 }
 
 // A player still seated in a full room is rejoining, not taking a new seat.

@@ -23,7 +23,7 @@ func TestCascadeNowFires(t *testing.T) {
 	}
 
 	r, _ := s.CreateRoom("ek", 6, "x")
-	s.AddPlayer(r.ID, "a", "red")
+	s.AddPlayer(r.ID, "a", "red", "", "")
 	s.AddTimelineEvent(r.ID, "join", "a", "")
 	if err := s.DeleteRoom(r.RoomKey); err != nil {
 		t.Fatal(err)
@@ -48,7 +48,7 @@ func TestMigrateSweepsPreExistingOrphans(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, _ := s.CreateRoom("ek", 6, "x")
-	s.AddPlayer(r.ID, "a", "red")
+	s.AddPlayer(r.ID, "a", "red", "", "")
 	s.AddTimelineEvent(r.ID, "join", "a", "")
 	if _, err := s.db.Exec("PRAGMA foreign_keys = OFF"); err != nil {
 		t.Fatal(err)
@@ -155,7 +155,7 @@ func TestDisconnectStampLifecycle(t *testing.T) {
 	defer s.Close()
 
 	room, _ := s.CreateRoom("ek", 6, "table")
-	s.AddPlayer(room.ID, "ana", "red")
+	s.AddPlayer(room.ID, "ana", "red", "", "")
 
 	seat := func() models.RoomPlayer {
 		t.Helper()
@@ -207,10 +207,10 @@ func TestAddPlayerClearsDisconnectStamp(t *testing.T) {
 	defer s.Close()
 
 	room, _ := s.CreateRoom("ek", 6, "table")
-	s.AddPlayer(room.ID, "ana", "red")
+	s.AddPlayer(room.ID, "ana", "red", "", "")
 	s.MarkPlayerDisconnected(room.ID, "ana")
 
-	if err := s.AddPlayer(room.ID, "ana", "blue"); err != nil {
+	if err := s.AddPlayer(room.ID, "ana", "blue", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	players, _ := s.GetRoomPlayers(room.ID)
@@ -228,7 +228,7 @@ func TestListStalePlayersOnlyReturnsHeldSeatsPastTheCutoff(t *testing.T) {
 
 	room, _ := s.CreateRoom("ek", 6, "table")
 	for _, name := range []string{"ana", "bo", "cy", "di"} {
-		s.AddPlayer(room.ID, name, "red")
+		s.AddPlayer(room.ID, name, "red", "", "")
 	}
 
 	// ana dropped two hours ago; bo dropped just now; cy never dropped;

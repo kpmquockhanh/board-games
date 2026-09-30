@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
 	"ping/handlers"
 	"ping/storage"
@@ -53,8 +54,14 @@ func main() {
 	defer stopReaper()
 	go h.RunReaper(reaperCtx, reaperCfg)
 
+	auth := handlers.AuthFromEnv()
+	h.UseAuth(auth)
+
 	api := router.Group("/api")
+	api.Use(h.Identify)
 	{
+		h.RegisterAccount(api)
+		h.RegisterAuth(api)
 		api.POST("/:game/create", h.CreateRoom)
 		api.POST("/:game/join", h.JoinRoom)
 		api.GET("/:game/rooms", h.ListRooms)
@@ -75,6 +82,11 @@ func main() {
 	fmt.Printf("   Create: POST http://localhost%s/api/{game}/create\n", addr)
 	fmt.Printf("   Join: POST http://localhost%s/api/{game}/join\n", addr)
 	fmt.Printf("   Database: %s\n", dbPath)
+	if names := auth.Names(); len(names) > 0 {
+		fmt.Printf("   Login: %s\n", strings.Join(names, ", "))
+	} else {
+		fmt.Printf("   Login: off (set AUTH_GOOGLE_* or AUTH_DISCORD_*)\n")
+	}
 	if reaperCfg.Enabled {
 		fmt.Printf("   Reaper: every %s — forfeit dropped players after %s, abandon idle rooms after %s, delete after %s, keep %d events\n",
 			reaperCfg.Interval, reaperCfg.DropPlayerAfter, reaperCfg.AbandonAfter,

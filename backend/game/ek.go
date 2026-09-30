@@ -48,6 +48,10 @@ type EKGameState struct {
 	// When the current turn is forced to draw, for clients to count down to.
 	TurnEndsAt *time.Time `json:"turnEndsAt,omitempty"`
 
+	// When this game was dealt. With the room, it names the game in the
+	// match history.
+	StartedAt time.Time `json:"startedAt"`
+
 	// The category of the last card whose effect actually happened. Clone used
 	// to copy whatever sat on top of the discard pile, which is just as often
 	// a spent Nope or a dead player's dumped hand.
@@ -308,6 +312,7 @@ func handleStartGame(gs *EKGameState, action GameAction) *ActionResult {
 	gs.TurnOrder = data.TurnOrder
 	gs.Turn = data.TurnOrder[0]
 	gs.Phase = "playing"
+	gs.StartedAt = time.Now()
 	gs.Winner = nil
 	gs.Log = []LogEntry{}
 	gs.AttackStack = 0

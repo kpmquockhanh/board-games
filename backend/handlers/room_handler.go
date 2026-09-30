@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"ping/game"
 	"ping/models"
@@ -35,7 +36,17 @@ type Handler struct {
 	// presence counts arrivals on each seat. See arrive.
 	presence   map[string]uint64
 	presenceMu sync.Mutex
+	// lobbyGrace is how long a seat dropped in the lobby is held before it is
+	// released. See HandleDisconnect.
+	lobbyGrace time.Duration
+
+	// auth is how people log in; nil offers no login.
+	auth *Auth
 }
+
+// defaultLobbyGrace covers a reload: the old page's socket closes before the
+// new page has joined, and a page load takes well under this.
+const defaultLobbyGrace = 5 * time.Second
 
 func NewHandler(store storage.Store, hub *ws.Hub) *Handler {
 	return &Handler{
@@ -44,6 +55,8 @@ func NewHandler(store storage.Store, hub *ws.Hub) *Handler {
 		ekStates: make(map[string]*game.EKGameState),
 		ekMu:     make(map[string]*sync.Mutex),
 		presence: make(map[string]uint64),
+
+		lobbyGrace: defaultLobbyGrace,
 	}
 }
 
@@ -287,6 +300,38 @@ func (h *Handler) CreateRoom(c *gin.Context) {
 	})
 }
 
+// takeSeatToThisDevice lets a signed-in account sit back down in its own seat
+// from a tab that has no token for it, such as one on another device. The
+// seat gets a new token, and the one the other device held stops working.
+//
+// The account only vouches for the seat the player named; it never picks one.
+// A guest cannot do this: its account is one browser, and two tabs of one
+// browser are how two people share a machine, so a guest's cookie must not
+// let one tab into the other's seat. A seat whose player is still connected
+// somewhere is not taken from them either.
+func (h *Handler) takeSeatToThisDevice(c *gin.Context, room *models.Room, playerName, session, tokenHash string) (claimed bool, refusal string, err error) {
+	u := currentUser(c)
+	if u == nil || u.Guest {
+		return false, "", nil
+	}
+	if h.hub.IsPlayerConnectedFromElsewhere(room.RoomKey, playerName, session) {
+		// Only the seat's own account is told why: to anyone else it is
+		// just a name that is taken.
+		players, err := h.store.GetRoomPlayers(room.ID)
+		if err != nil {
+			return false, "", err
+		}
+		for _, p := range players {
+			if p.PlayerName == playerName && p.UserID != nil && *p.UserID == u.ID {
+				return false, "you're playing in this seat on another device; close it there first", nil
+			}
+		}
+		return false, "", nil
+	}
+	claimed, err = h.store.ReissueSeatToken(room.ID, playerName, u.ID, tokenHash)
+	return claimed, "", err
+}
+
 func (h *Handler) JoinRoom(c *gin.Context) {
 	game := c.Param("game")
 	if !validGames[game] {
@@ -352,21 +397,90 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		}
 	}
 
+	// The token this tab was given for the name, if it has one. It is kept
+	// across a reload, and across leaving and coming back, so the socket URL
+	// the page reconnects with stays valid.
+	presented := presentedSeatToken(c)
+	holder, _, err := h.store.SeatHolder(room.ID, hashSecret(presented))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+		return
+	}
+	seatToken := presented
+	if holder != body.PlayerName {
+		seatToken = ""
+	}
+
+	// Only a request that is going to sit down may claim the seat's arrival
+	// (see arrive). A refused one used to claim it too, and the socket of the
+	// player actually sitting there then looked replaced: its drop was
+	// ignored, so their seat was never held for them, never forfeited, and in
+	// a lobby never released. The usual culprit is a second tab of the same
+	// browser, which finds the first tab's token in localStorage and tries it.
+	if seatToken != "" {
+		if h.hub.IsPlayerConnectedFromElsewhere(body.RoomKey, body.PlayerName, body.Session) {
+			c.JSON(http.StatusConflict, gin.H{"error": "player is already connected"})
+			return
+		}
+		// Claimed before the seat is read. A reload's request can overtake
+		// the teardown of the socket its previous page left open, and this
+		// is what tells that teardown, when it lands, that it has been
+		// superseded.
+		h.arrive(body.RoomKey, body.PlayerName)
+	}
+
 	// Before the capacity check: a player who is still seated is rejoining,
 	// not taking a new seat. A mid-game disconnect keeps their row (see
 	// HandleDisconnect), so at a full table this used to count them against
 	// the limit and refuse them their own game with "room is full".
-	// Claim the seat before reading it. A reload's request can overtake the
-	// teardown of the socket its previous page left open, and this is what
-	// tells that teardown, when it lands, that it has been superseded.
-	h.arrive(body.RoomKey, body.PlayerName)
-	h.hub.EvictSession(body.RoomKey, body.PlayerName, body.Session)
-
 	exists, err := h.store.IsPlayerInRoom(room.ID, body.PlayerName)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
+
+	if exists && seatToken == "" {
+		// Someone is sitting under this name and this is not their tab: the
+		// name is taken, whether or not its player is connected right now.
+		// Seats taken before tokens existed are the exception, and go to the
+		// first player to come back to them.
+		fresh, hash, err := newSecret()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue seat"})
+			return
+		}
+		claimed, err := h.store.ClaimUntokenedSeat(room.ID, body.PlayerName, hash)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
+		if !claimed {
+			var refusal string
+			claimed, refusal, err = h.takeSeatToThisDevice(c, room, body.PlayerName, body.Session, hash)
+			if err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+				return
+			}
+			if refusal != "" {
+				c.JSON(http.StatusConflict, gin.H{"error": refusal})
+				return
+			}
+		}
+		if !claimed {
+			c.JSON(http.StatusConflict, gin.H{"error": "that name is already taken in this room"})
+			return
+		}
+		seatToken = fresh
+		h.arrive(body.RoomKey, body.PlayerName)
+	} else if !exists && seatToken == "" {
+		h.arrive(body.RoomKey, body.PlayerName)
+	}
+
+	h.hub.EvictSession(body.RoomKey, body.PlayerName, body.Session)
+
+	// Sitting down is when a browser gets an account, if it has none yet.
+	userID := h.ensureUser(c)
+
 	if exists {
 		// Only a live socket from some other page means the name is taken. The
 		// one a reloading tab left behind is its own, and refusing it was what
@@ -377,6 +491,10 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		}
 		h.touch(room.ID)
 		h.markBack(room.ID, body.RoomKey, body.PlayerName)
+		if err := h.store.SetSeatUser(room.ID, body.PlayerName, userID); err != nil {
+			log.Printf("[auth] link seat %s in %s to user: %v", body.PlayerName, room.RoomKey, err)
+		}
+		h.rememberProfile(userID, body.PlayerName, body.Color)
 		players, _ := h.store.GetRoomPlayers(room.ID)
 		playerNames := make([]string, len(players))
 		for i, p := range players {
@@ -388,6 +506,7 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 			"status":      room.Status,
 			"max_players": room.MaxPlayers,
 			"players":     playerNames,
+			"seat_token":  seatToken,
 		})
 		return
 	}
@@ -402,10 +521,17 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		return
 	}
 
-	if err := h.store.AddPlayer(room.ID, body.PlayerName, body.Color); err != nil {
+	if seatToken == "" {
+		if seatToken, _, err = newSecret(); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to issue seat"})
+			return
+		}
+	}
+	if err := h.store.AddPlayer(room.ID, body.PlayerName, body.Color, hashSecret(seatToken), userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add player"})
 		return
 	}
+	h.rememberProfile(userID, body.PlayerName, body.Color)
 
 	h.store.AddTimelineEvent(room.ID, "join", body.PlayerName, "")
 	h.touch(room.ID)
@@ -432,6 +558,7 @@ func (h *Handler) JoinRoom(c *gin.Context) {
 		"status":      room.Status,
 		"max_players": room.MaxPlayers,
 		"players":     playerNames,
+		"seat_token":  seatToken,
 	})
 }
 
@@ -572,12 +699,17 @@ func (h *Handler) GetState(c *gin.Context) {
 		mu.Lock()
 		defer mu.Unlock()
 		// Never fall through to the raw snapshot for ek: it holds every hand
-		// and the deck in draw order.
-		// c.Query("player") is untrusted, but a view built for a name shows
-		// only that player's own hand, which they already hold.
+		// and the deck in draw order. The view is for the seat the token
+		// proves, never for a name the request merely claims: a view shows
+		// its player's hand, and ?player= used to show anyone's.
+		viewer, err := h.seatedPlayer(c, room.ID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
+			return
+		}
 		roomState := models.EKRoomStateView{RoomSettings: defaultEKSettings()}
 		if gs := h.loadEKState(roomKey, room.ID); gs != nil {
-			roomState.GameState = gs.ViewFor(c.Query("player"))
+			roomState.GameState = gs.ViewFor(viewer)
 		}
 		stateJSON, _, snapErr := h.store.GetLatestSnapshot(room.ID)
 		if snapErr == nil && stateJSON != "" {
@@ -639,16 +771,24 @@ func (h *Handler) SaveState(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "missing data"})
 		return
 	}
-	if body.Player != "" {
-		inRoom, err := h.store.IsPlayerInRoom(room.ID, body.Player)
+	// Whoever acts is whoever the seat token says, not whoever the body
+	// names. Every ek action is some player's; hotpot also takes anonymous
+	// writes, as it always has.
+	if body.Player != "" || game == "ek" {
+		seat, err := h.seatedPlayer(c, room.ID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 			return
 		}
-		if !inRoom {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "player not in room"})
+		if seat == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "you're not seated in this room"})
 			return
 		}
+		if body.Player != "" && body.Player != seat {
+			c.JSON(http.StatusForbidden, gin.H{"error": "you can only act for yourself"})
+			return
+		}
+		body.Player = seat
 	}
 
 	// One bump for every validated action, before the game-specific split, so
@@ -958,6 +1098,7 @@ func (h *Handler) applyEKResult(mu *sync.Mutex, roomKey string, roomID int64, re
 
 	// After the final state, so clients read the winner off a state they have.
 	if gameOver {
+		h.recordEKMatch(roomID, roomKey, gs)
 		h.hub.BroadcastToRoom(roomKey, models.WSMessage{
 			Type: "game_ended",
 			Room: roomKey,
@@ -1095,10 +1236,20 @@ func (h *Handler) broadcastEKState(roomKey string, gs *game.EKGameState) {
 }
 
 // HandleDisconnect decides what a dropped socket means. In a lobby it means the
-// player left. Mid-game it does not: they are still in the game, still in the
-// turn order, and taking them out of the room would refuse every action they
-// tried after reconnecting.
+// player left, but not straight away: a reload closes the old page's socket
+// before the new page has joined, so its epoch is not yet superseded when the
+// teardown lands. Releasing the seat then took the player out of the room and
+// seated them afresh a moment later, not ready any more. So a lobby seat is
+// held for lobbyGrace and released only if nobody has come back for it.
+//
+// Mid-game it does not mean they left: they are still in the game, still in
+// the turn order, and taking them out of the room would refuse every action
+// they tried after reconnecting.
 func (h *Handler) HandleDisconnect(roomKey, playerName string, epoch uint64) {
+	h.settleDisconnect(roomKey, playerName, epoch, true)
+}
+
+func (h *Handler) settleDisconnect(roomKey, playerName string, epoch uint64, graceful bool) {
 	if h.stillHere(roomKey, playerName, epoch) {
 		return
 	}
@@ -1140,6 +1291,15 @@ func (h *Handler) HandleDisconnect(roomKey, playerName string, epoch uint64) {
 			Player: playerName,
 		})
 		log.Printf("[ws] player dropped mid-game, holding their seat: room=%s player=%s", roomKey, playerName)
+		return
+	}
+
+	if graceful && h.lobbyGrace > 0 {
+		// Decided afresh when the grace runs out: by then they may be back,
+		// or the game may have started with them in it.
+		time.AfterFunc(h.lobbyGrace, func() {
+			h.settleDisconnect(roomKey, playerName, epoch, false)
+		})
 		return
 	}
 
@@ -1216,18 +1376,13 @@ func (h *Handler) DeleteRoom(c *gin.Context) {
 		return
 	}
 
-	playerName := c.Query("player")
-	if playerName == "" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "only a player in the room can delete it"})
-		return
-	}
-	inRoom, err := h.store.IsPlayerInRoom(room.ID, playerName)
+	seat, err := h.seatedPlayer(c, room.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	if !inRoom {
-		c.JSON(http.StatusForbidden, gin.H{"error": "player not in room"})
+	if seat == "" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only a player in the room can delete it"})
 		return
 	}
 
@@ -1274,12 +1429,12 @@ func (h *Handler) LeaveRoom(c *gin.Context) {
 		return
 	}
 
-	inRoom, err := h.store.IsPlayerInRoom(room.ID, body.PlayerName)
+	seat, err := h.seatedPlayer(c, room.ID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "database error"})
 		return
 	}
-	if !inRoom {
+	if seat != body.PlayerName {
 		c.JSON(http.StatusConflict, gin.H{"error": "player not in room"})
 		return
 	}

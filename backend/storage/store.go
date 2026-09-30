@@ -18,7 +18,11 @@ type Store interface {
 	ListIdleRooms(statuses []string, cutoff time.Time) ([]models.Room, error)
 	PruneTimelines(keep int) (int64, error)
 
-	AddPlayer(roomID int64, playerName, color string) error
+	AddPlayer(roomID int64, playerName, color, seatTokenHash, userID string) error
+	SetSeatUser(roomID int64, playerName, userID string) error
+	SeatHolder(roomID int64, seatTokenHash string) (name string, seated bool, err error)
+	ClaimUntokenedSeat(roomID int64, playerName, seatTokenHash string) (bool, error)
+	ReissueSeatToken(roomID int64, playerName, userID, seatTokenHash string) (bool, error)
 	RemovePlayer(roomID int64, playerName string) error
 	RemovePlayerByRoomKey(roomKey string, playerName string) error
 	RemoveAllPlayers(roomID int64) error
@@ -36,4 +40,17 @@ type Store interface {
 	SaveSnapshot(roomID int64, player string, state string) error
 	UpdateSnapshot(roomID int64, player string, state string) error
 	GetLatestSnapshot(roomID int64) (string, bool, error)
+
+	CreateGuest(sessionTokenHash string) (*models.User, error)
+	UserBySession(sessionTokenHash string) (*models.User, error)
+	RememberPlayerProfile(userID, name, color string) error
+	DeleteIdleGuests(cutoff time.Time) (int64, error)
+	SignIn(sessionTokenHash, previousSessionHash string, id models.Identity) (*models.User, error)
+	EndSession(sessionTokenHash string) error
+	UserProviders(userID string) ([]string, error)
+	UserSeats(userID string) ([]models.Seat, error)
+
+	RecordMatch(m models.MatchRecord) error
+	UserMatches(userID string, limit int) ([]models.Match, error)
+	UserCompanions(userID string, limit int) ([]models.Companion, error)
 }

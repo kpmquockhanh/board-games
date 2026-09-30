@@ -51,7 +51,7 @@
 <script setup>
 import { ref, onMounted, onUnmounted } from 'vue'
 import { ArrowLeft } from '@lucide/vue'
-import { getRoom } from '../api'
+import { getRoom, getAuthSession } from '../api'
 
 const props = defineProps({
   icon: { type: Object, default: null },
@@ -108,7 +108,19 @@ function join() {
   emit('join', { name: name.value.trim().slice(0, 16), color: chosenColor.value })
 }
 
+// A signed-in account offers the name and colour it last played under. A
+// guest's does not: its cookie is shared by every tab, and two people trying
+// the game in two tabs would each be offered the other's name.
+async function prefillFromAccount() {
+  if (props.initialName) return
+  const account = (await getAuthSession())?.user
+  if (!account || account.guest || name.value) return
+  name.value = (account.display_name || '').slice(0, 16)
+  if (!props.initialColor && COLORS.includes(account.color)) chosenColor.value = account.color
+}
+
 onMounted(() => {
+  prefillFromAccount()
   if (!props.inline && props.game && props.roomKey) {
     fetchRoomStatus()
     pollTimer = setInterval(fetchRoomStatus, 5000)

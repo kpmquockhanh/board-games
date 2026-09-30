@@ -33,7 +33,8 @@ func liveServer(t *testing.T) (*Handler, *gin.Engine, *httptest.Server) {
 func dial(t *testing.T, srv *httptest.Server, roomKey, player, session string) *websocket.Conn {
 	t.Helper()
 	url := "ws" + strings.TrimPrefix(srv.URL, "http") +
-		"/ws?room=" + roomKey + "&player=" + player + "&session=" + session
+		"/ws?room=" + roomKey + "&player=" + player + "&session=" + session +
+		"&token=" + seatTokenOf(roomKey, player)
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial %s: %v", url, err)
@@ -49,8 +50,10 @@ func postJoinAs(t *testing.T, r *gin.Engine, roomKey, player, session string) *h
 	})
 	req := httptest.NewRequest(http.MethodPost, "/api/ek/join", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(seatTokenHeader, seatTokenOf(roomKey, player))
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
+	rememberSeatToken(t, roomKey, player, w)
 	return w
 }
 
@@ -294,4 +297,40 @@ func TestASocketCanBeSentToAsSoonAsItIsRegistered(t *testing.T) {
 	if !hub.IsPlayerConnected("room", "ana") {
 		t.Fatal("a client just registered is not connected")
 	}
+}
+
+// A second tab of the same browser finds the first tab's seat token in
+// localStorage and tries it. Refusing it used to still count as a new arrival
+// on the seat, so when the first tab really did go away its drop was taken
+// for a superseded page and ignored: the seat was never held for its player,
+// and so never forfeited either.
+func TestARefusedJoinDoesNotHideTheSeatHoldersDrop(t *testing.T) {
+	h, r, srv := liveServer(t)
+	room := postCreate(t, h, r, "in progress")
+	for _, name := range []string{"ana", "bo"} {
+		if w := postJoinAs(t, r, room.RoomKey, name, "tab-"+name); w.Code != http.StatusOK {
+			t.Fatalf("seating %s: %d", name, w.Code)
+		}
+	}
+	startedGame(t, h, room.RoomKey, "ana", "bo")
+
+	conn := dial(t, srv, room.RoomKey, "ana", "tab-ana")
+	eventually(t, "ana's socket to register", func() bool {
+		return h.hub.IsPlayerConnected(room.RoomKey, "ana")
+	})
+
+	// Another tab, holding ana's token, and a stranger without it.
+	if w := postJoinAs(t, r, room.RoomKey, "ana", "tab-other"); w.Code != http.StatusConflict {
+		t.Fatalf("another tab joined as the connected ana: %d %s", w.Code, w.Body)
+	}
+	if w := request(r, http.MethodPost, "/api/ek/join", "", map[string]string{
+		"room_key": room.RoomKey, "player_name": "ana", "color": "red", "session": "tab-stranger",
+	}); w.Code != http.StatusConflict {
+		t.Fatalf("a stranger joined as ana: %d %s", w.Code, w.Body)
+	}
+
+	conn.Close()
+	eventually(t, "ana's drop to hold her seat", func() bool {
+		return playerSeat(t, h, room.ID, "ana").DisconnectedAt != nil
+	})
 }

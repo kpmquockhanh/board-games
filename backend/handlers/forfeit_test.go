@@ -83,15 +83,47 @@ func TestDisconnectMidGameStampsTheSeatInsteadOfReleasingIt(t *testing.T) {
 }
 
 // In a lobby a drop just means leaving, and no clock is needed.
-func TestDisconnectInLobbyReleasesTheSeatOutright(t *testing.T) {
+// A lobby drop releases the seat, once the grace a reload needs has run out.
+func TestDisconnectInLobbyReleasesTheSeatAfterTheGrace(t *testing.T) {
 	h, r := newTestHandler(t)
+	h.lobbyGrace = 50 * time.Millisecond
 	room := postCreate(t, h, r, "lobby")
 	postJoin(t, r, room.RoomKey, "ana")
 
 	dropSocket(h, room.RoomKey, "ana")
+	if !seated(t, h, room.ID, "ana") {
+		t.Fatal("a lobby drop released the seat before a reload could come back for it")
+	}
 
+	time.Sleep(4 * h.lobbyGrace)
 	if seated(t, h, room.ID, "ana") {
-		t.Fatal("a lobby drop left the seat held")
+		t.Fatal("a lobby drop left the seat held after the grace")
+	}
+}
+
+// Reloading in the lobby closes the old socket before the new page joins.
+// Releasing the seat in between seated the player afresh, and not ready.
+func TestReloadingInTheLobbyKeepsTheSeatAndItsReadyFlag(t *testing.T) {
+	h, r, _ := seatServer(t)
+	h.lobbyGrace = 50 * time.Millisecond
+	room := postCreate(t, h, r, "lobby")
+	postJoinAs(t, r, room.RoomKey, "ana", "tab-ana")
+	ready := map[string]any{"action": "toggleReady", "data": map[string]any{}, "player": "ana"}
+	if w := request(r, http.MethodPost, "/api/ek/rooms/"+room.RoomKey+"/state", seatTokenOf(room.RoomKey, "ana"), ready); w.Code != http.StatusOK {
+		t.Fatalf("ready: got %d; body %s", w.Code, w.Body)
+	}
+
+	dropSocket(h, room.RoomKey, "ana")
+	if w := postJoinAs(t, r, room.RoomKey, "ana", "tab-ana"); w.Code != http.StatusOK {
+		t.Fatalf("rejoin: got %d; body %s", w.Code, w.Body)
+	}
+
+	time.Sleep(4 * h.lobbyGrace)
+	if !seated(t, h, room.ID, "ana") {
+		t.Fatal("the reload lost ana her seat")
+	}
+	if !playerSeat(t, h, room.ID, "ana").Ready {
+		t.Fatal("the reload lost ana her ready flag")
 	}
 }
 
